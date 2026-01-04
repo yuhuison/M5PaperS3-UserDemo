@@ -472,13 +472,36 @@ void saveWifiConfig(const std::string& ssid, const std::string& password) {
 
 ### 2. SD卡写入失败 (errno=22)
 
-**症状**: `fopen()`失败，errno=22 (EINVAL)
+**症状**: `fopen()`失败，errno=22 (EINVAL)，日志显示"Failed to open file for writing"
 
-**原因**: FATFS长文件名支持被禁用，文件名超过8.3格式
+**原因**: FATFS长文件名支持被禁用（`CONFIG_FATFS_LFN_NONE=y`），文件名超过8.3格式限制
+
+**详细说明**:
+- ESP-IDF默认禁用FATFS长文件名支持
+- 8.3格式：`FILENAME.EXT`（文件名≤8字符，扩展名≤3字符）
+- `wifi_config.txt` 超过了8.3限制，被视为非法文件名
 
 **解决方案**: 
-- 修改`sdkconfig`启用`CONFIG_FATFS_LFN_HEAP=y`
-- 或使用8.3格式文件名（不推荐）
+修改 `sdkconfig` 启用长文件名支持：
+```ini
+# 启用长文件名支持（HEAP模式）
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# 禁用以下选项
+# CONFIG_FATFS_LFN_NONE is not set
+```
+
+**三种模式对比**:
+- `LFN_NONE`: 不支持长文件名（默认，**会导致errno=22**）
+- `LFN_HEAP`: 缓冲区在堆上分配（**推荐**，灵活且内存使用合理）
+- `LFN_STACK`: 缓冲区在栈上分配（快但占用栈空间，255字节×2）
+
+**修改后必须重新编译**:
+```bash
+idf.py fullclean
+idf.py build flash
+```
 
 ### 3. 触摸事件被多个App处理
 
@@ -533,6 +556,32 @@ idf.py build
 ```cpp
 lcd.setFont(&fonts::efontCN_24_b);  // 使用efontCN系列
 ```
+
+---
+
+### 7. USB Serial JTAG与SD卡的兼容性
+
+**配置说明**: ESP32-S3支持USB Serial JTAG作为第二串口
+
+**当前配置**:
+```ini
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y          # 主串口：UART0
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y  # 副串口：USB Serial JTAG
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+```
+
+**GPIO使用情况**:
+- UART0: GPIO43(TX), GPIO44(RX) - 不与SD卡冲突
+- USB Serial JTAG: GPIO19(D-), GPIO20(D+) - **可能与某些外设冲突**
+- SD卡 SPI: GPIO11(MOSI), GPIO13(MISO), GPIO12(CLK), GPIO47(CS)
+
+**注意事项**:
+- M5PaperS3的USB Serial JTAG与SD卡SPI总线**不冲突**
+- 如果遇到问题，可以禁用USB Serial JTAG：
+  ```ini
+  # CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
+  # CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED is not set
+  ```
 
 ---
 

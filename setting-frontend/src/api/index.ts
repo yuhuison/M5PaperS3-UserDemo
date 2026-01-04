@@ -51,6 +51,22 @@ export interface BookMetadata {
 /** 上传进度回调 */
 export type UploadProgressCallback = (stage: string, percent: number) => void;
 
+/** 链接信息 */
+export interface LinkInfo {
+  text: string;
+  rect: { x: number; y: number; width: number; height: number };
+  href: string;
+  type: 'internal' | 'external';
+  target?: { section: number; page: number };
+}
+
+/** 页面链接信息 */
+export interface PageLinks {
+  page: number;
+  hasImage: boolean;  // 该页是否包含图片
+  links: LinkInfo[];
+}
+
 // ============ API 接口 ============
 
 export interface IDeviceClient {
@@ -66,7 +82,7 @@ export interface IDeviceClient {
   /** 删除图书 */
   deleteBook(bookId: string): Promise<void>;
   
-  /** 上传图书 (PNG图片格式) */
+  /** 上传图书 (PNG图片格式 + 链接信息) */
   uploadBook(
     bookId: string,
     title: string,
@@ -76,7 +92,9 @@ export interface IDeviceClient {
       index: number;
       title: string;
       pages: Blob[];  // PNG 图片数组
+      pageLinks?: PageLinks[];  // 链接信息（可选）
     }>,
+    anchorMap?: Record<string, { section: number; page: number }>,
     onProgress?: UploadProgressCallback
   ): Promise<void>;
 }
@@ -180,7 +198,9 @@ class HttpDeviceClient implements IDeviceClient {
       index: number;
       title: string;
       pages: Blob[];
+      pageLinks?: PageLinks[];
     }>,
+    anchorMap?: Record<string, { section: number; page: number }>,
     onProgress?: UploadProgressCallback
   ): Promise<void> {
     const bookPath = `/books/${bookId}`;
@@ -219,8 +239,8 @@ class HttpDeviceClient implements IDeviceClient {
     // 3. 使用批量上传
     onProgress?.('上传文件', 10);
     
-    // 分批上传，每批最多20个文件
-    const BATCH_SIZE = 20;
+    // 分批上传，每批最多40个文件（优化后的图片更小，设备buffer已增大）
+    const BATCH_SIZE = 40;
     const totalFiles = filesToUpload.length;
     let uploadedFiles = 0;
     
@@ -249,10 +269,54 @@ class HttpDeviceClient implements IDeviceClient {
       onProgress?.('上传文件', percent);
     }
     
-    // 4. 创建 metadata.json
+    // 4. 处理链接目标解析
+    onProgress?.('处理链接信息', 85);
+    
+    // 构建锚点映射
+    const resolvedAnchorMap: Record<string, { section: number; page: number }> = 
+      anchorMap ? { ...anchorMap } : {};
+    
+    // 解析每个章节的链接，填充 target 字段
+    for (const section of sections) {
+      if (section.pageLinks) {
+        for (const pageLink of section.pageLinks) {
+          for (const link of pageLink.links) {
+            if (link.type === 'internal' && link.href.startsWith('#')) {
+              const anchorId = link.href.substring(1); // 移除 '#'
+              const target = resolvedAnchorMap[anchorId];
+              if (target) {
+                link.target = target;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // 5. 上传每个章节的 links.json（包含页面元数据）
+    onProgress?.('上传页面元数据', 90);
+    
+    for (const section of sections) {
+      // 始终上传 links.json，即使没有链接（因为包含 hasImage 信息）
+      if (section.pageLinks && section.pageLinks.length > 0) {
+        const linksData = {
+          pages: section.pageLinks
+        };
+        
+        const linksBlob = new Blob(
+          [JSON.stringify(linksData, null, 2)],
+          { type: 'application/json' }
+        );
+        
+        const sectionDir = `${bookPath}/sections/${String(section.index).padStart(3, '0')}`;
+        await this.uploadFile(linksBlob, `${sectionDir}/links.json`);
+      }
+    }
+    
+    // 6. 创建 metadata.json
     onProgress?.('保存元数据', 95);
     
-    const metadata = {
+    const metadata: any = {
       id: bookId,
       title,
       author,
@@ -262,6 +326,11 @@ class HttpDeviceClient implements IDeviceClient {
         pageCount: s.pages.length,
       })),
     };
+    
+    // 添加锚点映射（如果存在）
+    if (resolvedAnchorMap && Object.keys(resolvedAnchorMap).length > 0) {
+      metadata.anchorMap = resolvedAnchorMap;
+    }
     
     const metadataBlob = new Blob(
       [JSON.stringify(metadata, null, 2)],

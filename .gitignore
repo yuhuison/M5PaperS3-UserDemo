@@ -57,6 +57,7 @@ release/
 out/
 bin/
 obj/
+examples/
 
 *.code-workspace
 

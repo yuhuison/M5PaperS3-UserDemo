@@ -205,7 +205,7 @@ void Hal::sd_card_init()
         .sclk_io_num     = PIN_SCLK,
         .quadwp_io_num   = -1,
         .quadhd_io_num   = -1,
-        .max_transfer_sz = 16384,  // 增大传输大小提高速度
+        .max_transfer_sz = 4096 * 16,  // 64KB - SPI驱动允许的最大单次传输
     };
 
     // Initialize SPI bus only if not already initialized
@@ -322,6 +322,11 @@ void Hal::wifi_init()
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    
+    // 禁用省电模式以获得最大传输性能
+    // 代价是功耗增加，但对于有线供电场景影响不大
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    mclog::tagInfo(_tag, "WiFi power save disabled for maximum performance");
 }
 
 void Hal::wifiScan()

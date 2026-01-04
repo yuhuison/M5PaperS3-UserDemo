@@ -16,12 +16,14 @@
     ├── reading_status.json             # 阅读进度（设备自动维护）
     ├── cover.png                       # 封面图片
     └── sections/                       # 章节目录（对应 EPUB 章节）
-        ├── 001/                        # 第1章
-        │   ├── 001.png                 # 第1章第1页
-        │   ├── 002.png                 # 第1章第2页
+        ├── 000/                        # 第0章（章节索引从0开始）
+        │   ├── 001.png                 # 第0章第1页（页码从1开始）
+        │   ├── 002.png                 # 第0章第2页
+        │   ├── links.json              # 本章节所有页面的链接信息（可选）
         │   └── ...
-        ├── 002/                        # 第2章
+        ├── 001/                        # 第1章
         │   ├── 001.png
+        │   ├── links.json
         │   └── ...
         └── ...
 ```
@@ -38,18 +40,28 @@
     "addedAt": "2026-01-03T12:00:00Z",
     "sections": [
         {
-            "index": 1,
+            "index": 0,
             "title": "第一章 开篇",
             "pageCount": 15
         },
         {
-            "index": 2,
+            "index": 1,
             "title": "第二章 发展",
             "pageCount": 23
         }
-    ]
+    ],
+    "anchorMap": {
+        "chapter1": { "section": 0, "page": 1 },
+        "section2-1": { "section": 1, "page": 1 },
+        "important-note": { "section": 1, "page": 5 }
+    }
 }
 ```
+
+**新增字段说明**：
+- `anchorMap`: 锚点映射表（可选），将 HTML 锚点 ID 映射到具体的章节和页面
+  - 键：锚点 ID（从 EPUB 中的 `id` 属性或 `<a name="">` 提取）
+  - 值：`{ section: 章节索引（从0开始）, page: 页码（从1开始） }`
 
 ### 2. reading_status.json（设备自动创建和维护）
 
@@ -57,14 +69,15 @@
 
 ```json
 {
-    "currentSection": 1,
+    "currentSection": 0,
     "currentPage": 1,
     "lastReadTime": "2026-01-03T14:30:00Z"
 }
 ```
 
 **注意**：
-- `currentSection` 和 `currentPage` 均从 **1** 开始
+- `currentSection` 从 **0** 开始（对应目录 000/, 001/, ...）
+- `currentPage` 从 **1** 开始（对应文件 001.png, 002.png, ...）
 - 设备端在用户翻页时更新此文件
 - `lastReadTime` 使用 ISO8601 格式
 
@@ -82,6 +95,97 @@
 - **颜色**: **必须**使用灰度 8-bit（无 Alpha 通道）
 - **压缩**: 最高压缩级别
 - **大小**: **必须** < 80KB（否则可能触发看门狗超时）
+
+### 5. 链接信息文件 (sections/{section}/links.json)（可选）
+
+如果章节中包含链接（`<a>` 标签），则生成此文件，包含所有页面的可点击链接区域信息。
+
+**注意：即使某页没有链接，也会包含该页的元数据（用于标记是否有图片）。**
+
+```json
+{
+    "pages": [
+        {
+            "page": 1,
+            "hasImage": true,
+            "links": [
+                {
+                    "text": "跳转到第三章",
+                    "rect": {
+                        "x": 100,
+                        "y": 200,
+                        "width": 150,
+                        "height": 30
+                    },
+                    "href": "#chapter3",
+                    "type": "internal",
+                    "target": {
+                        "section": 2,
+                        "page": 1
+                    }
+                },
+                {
+                    "text": "外部链接",
+                    "rect": {
+                        "x": 50,
+                        "y": 450,
+                        "width": 200,
+                        "height": 28
+                    },
+                    "href": "https://example.com",
+                    "type": "external"
+                }
+            ]
+        },
+        {
+            "page": 2,
+            "hasImage": false,
+            "links": []
+        }
+    ]
+}
+```
+
+**字段说明**：
+
+- `pages`: 页面数组，按页码顺序排列
+  - `page`: 页码（从 1 开始）
+  - `hasImage`: 该页是否包含图片（布尔值）
+    - `true`: 页面包含图片，设备端应使用较慢的刷新模式以保证图片质量
+    - `false`: 纯文本页面，设备端可使用快速刷新模式
+  - `links`: 该页面的链接数组
+
+- 链接对象字段：
+  - `text`: 链接文本内容（最多 100 字符，超出则截断）
+  - `rect`: 碰撞检测区域（相对于页面左上角的坐标）
+    - `x`: 左上角 X 坐标（像素）
+    - `y`: 左上角 Y 坐标（像素）
+    - `width`: 宽度（像素）
+    - `height`: 高度（像素）
+  - `href`: 原始链接地址
+  - `type`: 链接类型
+    - `"internal"`: 内部跳转（`#` 开头）
+    - `"external"`: 外部链接（`http://` 或 `https://` 开头）
+  - `target`: 目标位置（仅 `type="internal"` 时存在）
+    - `section`: 目标章节索引（从 **0** 开始，对应目录 000/, 001/, ...）
+    - `page`: 目标页码（从 **1** 开始，对应文件 001.png, 002.png, ...）
+
+**设备端处理建议**：
+
+1. **内部链接**：
+   - 读取 `target.section` 和 `target.page`
+   - 跳转到对应章节和页面
+   - 在屏幕上绘制链接区域的下划线或高亮框
+
+2. **外部链接**：
+   - 保留 `href` 信息
+   - 设备端不执行跳转（无网络功能）
+   - 可选：在屏幕上显示 "外部链接" 标记
+
+3. **触摸检测**：
+   - 用户触摸屏幕时，检测触摸点是否在任何 `rect` 区域内
+   - 如果在内部链接区域，执行跳转
+   - 如果在外部链接区域，显示提示信息
 
 ## 页面裁剪方案设计
 
@@ -178,7 +282,7 @@ def split_chapter_to_pages(chapter_image_path, output_dir):
     
     Args:
         chapter_image_path: 章节渲染后的长图路径
-        output_dir: 输出目录，如 /sdcard/books/xxx/sections/001/
+        output_dir: 输出目录，如 /sdcard/books/xxx/sections/000/（章节从0开始）
     """
     # 打开并转换为灰度
     img = Image.open(chapter_image_path).convert('L')
@@ -189,7 +293,47 @@ def split_chapter_to_pages(chapter_image_path, output_dir):
         new_height = int(img.height * ratio)
         img = img.resize((PAGE_WIDTH, new_height), Image.Resampling.LANCZOS)
     
-    total_height = img.height
+  
+  // 加载链接信息（如果存在）
+  linksPath = /sdcard/books/{id}/sections/{section:03d}/links.json
+  if (fileExists(linksPath)):
+    links = loadLinksForPage(linksPath, currentPage)
+    drawLinkIndicators(links)  // 在链接下方绘制下划线或边框
+
+触摸事件处理:
+  if (userTouch(x, y)):
+    for link in currentPageLinks:
+      if (x >= link.rect.x && x <= link.rect.x + link.rect.width &&
+          y >= link.rect.y && y <= link.rect.y + link.rect.height):
+        if (link.type == "internal" && link.target):
+          currentSection = link.target.section
+          currentPage = link.target.page
+          loadPage()
+          return
+        else if (link.type == "external"):
+          showMessage("外部链接不支持")
+          return
+```
+
+### 链接功能实现要点
+
+1. **内存优化**：
+   - 只加载当前页面的链接信息，不要一次性加载整本书的链接
+   - 使用 ArduinoJson 的流式解析，避免加载整个 JSON 到内存
+
+2. **视觉反馈**：
+   - 在链接文本下方绘制细下划线（1-2 像素）
+   - 或者在链接周围绘制虚线边框
+   - 使用较浅的灰度值（如 200）避免过于突兀
+
+3. **触摸精度**：
+   - 链接的 `rect` 区域已经考虑了文本的实际渲染位置
+   - 建议在 Y 轴方向上扩展 5-10 像素的容错空间，提升点击体验
+
+4. **跳转历史**（可选）：
+   - 实现一个简单的"返回"功能
+   - 记录跳转前的位置（section, page）
+   - 按特定按钮可返回上一个阅读位置 total_height = img.height
     page_num = 1
     y_offset = 0
     
@@ -259,20 +403,81 @@ const STEP_HEIGHT = PAGE_HEIGHT - OVERLAP_HEIGHT;  // 800px 步进
 翻到下一页:
   if (currentPage < currentSection.pageCount):
     currentPage++
-  else if (currentSection < totalSections):
+  else if (currentSection < totalSections - 1):  // 章节索引从0开始
     currentSection++
     currentPage = 1
     
 翻到上一页:
   if (currentPage > 1):
     currentPage--
-  else if (currentSection > 1):
+  else if (currentSection > 0):  // 最小章节索引为0
     currentSection--
-    currentPage = sections[currentSection-1].pageCount
+    currentPage = sections[currentSection].pageCount  // 直接通过索引查找
 
 加载页面:
   path = /sdcard/books/{id}/sections/{section:03d}/{page:03d}.png
+  
+  // 检查是否有链接信息文件（同时获取图片标志）
+  linksPath = /sdcard/books/{id}/sections/{section:03d}/links.json
+  hasImage = false  // 默认无图片
+  
+  if (fileExists(linksPath)):
+    linksData = loadJson(linksPath)
+    pageData = linksData.pages.find(p => p.page == currentPage)
+    if (pageData):
+      hasImage = pageData.hasImage
+      links = pageData.links
+  
+  // 根据是否有图片选择刷新模式
+  if (hasImage):
+    display.setRefreshMode(GC16)  // 高质量刷新，适合图片
+  else:
+    display.setRefreshMode(DU)    // 快速刷新，适合纯文本
+  
   display.drawPng(path, 0, 0)  // 直接绘制到 (0,0)，无需裁剪
+  
+  // 如果有链接，绘制链接指示器
+  if (links && links.length > 0):
+    drawLinkIndicators(links)
+
+触摸事件处理:
+  if (userTouch(x, y)):
+    for link in currentPageLinks:
+      if (x >= link.rect.x && x <= link.rect.x + link.rect.width &&
+          y >= link.rect.y && y <= link.rect.y + link.rect.height):
+        if (link.type == "internal" && link.target):
+          currentSection = link.target.section
+          currentPage = link.target.page
+          loadPage()
+          return
+        else if (link.type == "external"):
+          showMessage("外部链接不支持")
+          return
+```
+
+### 刷新模式优化
+
+利用 `hasImage` 标志可以显著提升用户体验：
+
+| 页面类型 | hasImage | 推荐刷新模式 | 效果 |
+|---------|----------|-------------|------|
+| 纯文本 | `false` | DU/A2 | 快速翻页（~300ms），适合文字阅读 |
+| 含图片 | `true` | GC16 | 高质量显示（~800ms），保证图片清晰 |
+
+**实现示例（ESP32 + M5EPD）**：
+
+```cpp
+// 加载页面元数据
+bool hasImage = false;
+if (loadPageMetadata(bookId, section, page, &hasImage)) {
+    if (hasImage) {
+        M5.EPD.SetRotation(90);
+        M5.EPD.Clear(true);  // 全刷新
+    } else {
+        M5.EPD.SetRotation(90);
+        M5.EPD.Clear(false);  // 快速刷新
+    }
+}
 ```
 
 ## 联系方式

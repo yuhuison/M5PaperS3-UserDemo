@@ -170,7 +170,7 @@ fetch('http://192.168.1.100/api/file?path=/books/novel.epub')
 
 ### 4. 上传文件
 
-上传文件到指定路径。如果文件已存在，将被覆盖。
+上传文件到指定路径。如果文件已存在，将被覆盖。**会自动创建父目录**（如果不存在）。
 
 **端点**: `POST /api/file?path=<文件路径>`
 
@@ -288,7 +288,7 @@ fetch('http://192.168.1.100/api/file?path=/test.txt', {
 
 ### 6. 创建目录
 
-创建新目录。如果目录已存在，不会报错。
+创建新目录。**支持递归创建**（类似 `mkdir -p`），会自动创建所有不存在的父目录。如果目录已存在，不会报错。
 
 **端点**: `POST /api/mkdir?path=<目录路径>`
 
@@ -302,9 +302,8 @@ fetch('http://192.168.1.100/api/file?path=/test.txt', {
 # 创建单级目录
 curl -X POST http://192.168.1.100/api/mkdir?path=/books
 
-# 创建多级目录需要逐级创建
-curl -X POST http://192.168.1.100/api/mkdir?path=/books
-curl -X POST http://192.168.1.100/api/mkdir?path=/books/novels
+# 创建多级目录（自动创建所有父目录）
+curl -X POST http://192.168.1.100/api/mkdir?path=/books/novels/scifi
 ```
 
 **JavaScript示例**:

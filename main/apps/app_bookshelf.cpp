@@ -35,7 +35,7 @@ static constexpr uint32_t COLOR_BTN = 0xEEEEEE;
 static constexpr uint32_t COLOR_PROGRESS = 0x333333;
 
 // 翻页刷新控制
-static constexpr int FULL_REFRESH_INTERVAL = 5;  // 每5页全刷新一次
+static constexpr int FULL_REFRESH_INTERVAL = 8;  // 每8页全刷新一次
 
 void AppBookshelf::onCreate()
 {
@@ -145,9 +145,29 @@ void AppBookshelf::loadBooks()
         
         cJSON* titleItem = cJSON_GetObjectItem(json, "title");
         cJSON* authorItem = cJSON_GetObjectItem(json, "author");
+        cJSON* addedAtItem = cJSON_GetObjectItem(json, "addedAt");
         
         book.title = titleItem ? titleItem->valuestring : "未知书名";
         book.author = authorItem ? authorItem->valuestring : "未知作者";
+        book.addedAt = addedAtItem ? addedAtItem->valuestring : "";
+        
+        // 解析 anchorMap（可选）
+        cJSON* anchorMapItem = cJSON_GetObjectItem(json, "anchorMap");
+        if (anchorMapItem) {
+            cJSON* anchor = nullptr;
+            cJSON_ArrayForEach(anchor, anchorMapItem) {
+                if (anchor->string) {
+                    cJSON* sectionItem = cJSON_GetObjectItem(anchor, "section");
+                    cJSON* pageItem = cJSON_GetObjectItem(anchor, "page");
+                    if (sectionItem && pageItem) {
+                        book.anchorMap[anchor->string] = 
+                            std::make_pair(sectionItem->valueint, pageItem->valueint);
+                    }
+                }
+            }
+            mclog::tagInfo(getAppInfo().name, "Loaded {} anchors for book {}", 
+                          book.anchorMap.size(), bookId);
+        }
         
         // 读取章节信息
         cJSON* sectionsArray = cJSON_GetObjectItem(json, "sections");
@@ -160,6 +180,10 @@ void AppBookshelf::loadBooks()
                 info.title = cJSON_GetObjectItem(section, "title")->valuestring;
                 info.pageCount = cJSON_GetObjectItem(section, "pageCount")->valueint;
                 book.sections.push_back(info);
+                
+                mclog::tagInfo(getAppInfo().name, 
+                              "Loaded section: index={}, title={}, pageCount={}", 
+                              info.index, info.title, info.pageCount);
             }
         }
         
@@ -309,6 +333,9 @@ void AppBookshelf::drawBookItem(int index, int y)
 {
     const BookInfo& book = _books[index];
     
+    // 绘制背景（确保清除旧内容）
+    GetHAL().display.fillRect(LIST_PADDING, y, SCREEN_WIDTH - 2 * LIST_PADDING, LIST_ITEM_HEIGHT, COLOR_BG);
+    
     // 绘制边框
     GetHAL().display.drawRect(LIST_PADDING, y, SCREEN_WIDTH - 2 * LIST_PADDING, LIST_ITEM_HEIGHT, COLOR_BORDER);
     
@@ -317,7 +344,9 @@ void AppBookshelf::drawBookItem(int index, int y)
     int coverY = y + (LIST_ITEM_HEIGHT - COVER_SIZE) / 2;
     
     if (book.coverData && book.coverSize > 0) {
-        GetHAL().display.drawPng(book.coverData, book.coverSize, coverX, coverY, COVER_SIZE, COVER_SIZE);
+        // 封面是 540×540，缩放到 160×160
+        // scale = 160.0 / 540.0 = 0.296
+        GetHAL().display.drawPng(book.coverData, book.coverSize, coverX, coverY, 0, 0, 0, 0, 160.0f / 540.0f, 0.0f);
     } else {
         GetHAL().display.fillRect(coverX, coverY, COVER_SIZE, COVER_SIZE, COLOR_BTN);
         GetHAL().display.setFont(&fonts::efontCN_16_b);
@@ -440,9 +469,23 @@ void AppBookshelf::openBook(int bookIndex)
     _reading_page = book.currentPage;
     
     // 验证章节和页码有效性
-    if (_reading_section < 1 || _reading_section > (int)book.sections.size()) {
-        _reading_section = 1;
+    bool validSection = false;
+    for (const auto& sec : book.sections) {
+        if (sec.index == _reading_section) {
+            validSection = true;
+            break;
+        }
     }
+    
+    if (!validSection || _reading_section < 0) {
+        // 默认从第一个章节开始
+        if (!book.sections.empty()) {
+            _reading_section = book.sections[0].index;
+        } else {
+            _reading_section = 0;
+        }
+    }
+    
     if (_reading_page < 1) {
         _reading_page = 1;
     }
@@ -462,6 +505,9 @@ void AppBookshelf::loadPage()
     
     if (_selected_book < 0) return;
     const BookInfo& book = _books[_selected_book];
+    
+    mclog::tagInfo(getAppInfo().name, "drawReadingPage: section={}, page={}", 
+                   _reading_section, _reading_page);
     
     // 构建页面文件路径: /sdcard/books/{id}/sections/{section:03d}/{page:03d}.png
     char path[256];
@@ -485,17 +531,26 @@ void AppBookshelf::loadPage()
     fclose(f);
     
     mclog::tagInfo(getAppInfo().name, "Page loaded, size: {} bytes", _page_image_size);
+    
+    // 加载当前页面的链接信息
+    loadPageLinks();
 }
 
 void AppBookshelf::drawReading(bool fastMode)
 {
-    mclog::tagInfo(getAppInfo().name, "drawReading, fastMode={}", fastMode);
+    mclog::tagInfo(getAppInfo().name, "drawReading, fastMode={}, hasImage={}", fastMode, _current_page_has_image);
     
-    // 根据模式选择刷新方式
+    // 根据模式和图片标志选择刷新方式
     if (fastMode) {
-        GetHAL().display.setEpdMode(epd_mode_t::epd_fast);
+        // 快速翻页模式
+        if (_current_page_has_image) {
+            GetHAL().display.setEpdMode(epd_mode_t::epd_text);     // 有图片用 text 模式，质量更好
+        } else {
+            GetHAL().display.setEpdMode(epd_mode_t::epd_fastest);  // 纯文本用最快模式
+        }
     } else {
-        GetHAL().display.setEpdMode(epd_mode_t::epd_quality);
+        // 全刷新模式（每8页一次）
+        GetHAL().display.setEpdMode(epd_mode_t::epd_quality);  // 全刷新用高质量模式
     }
     GetHAL().display.fillScreen(COLOR_BG);
     
@@ -518,6 +573,9 @@ void AppBookshelf::drawReading(bool fastMode)
     
     // 绘制底部UI（常驻显示）
     drawBottomBar();
+    
+    // 绘制链接指示器（如果有链接）
+    drawLinkIndicators();
     
     // 绘制目录（如果显示）
     if (_show_toc) {
@@ -688,7 +746,13 @@ void AppBookshelf::handleReadingTouch()
         return;
     }
     
-    // 内容区域：左右分区触摸翻页
+    // 内容区域：先检查是否点击了链接
+    if (handleLinkTouch(x, y)) {
+        // 链接已处理，不执行翻页
+        return;
+    }
+    
+    // 左右分区触摸翻页
     int half = SCREEN_WIDTH / 2;
     
     if (x < half) {
@@ -703,23 +767,40 @@ void AppBookshelf::nextPage()
     if (_selected_book < 0) return;
     const BookInfo& book = _books[_selected_book];
     
-    // 获取当前章节信息
-    int currentSectionIdx = _reading_section - 1;
-    if (currentSectionIdx < 0 || currentSectionIdx >= (int)book.sections.size()) return;
+    // 查找当前章节
+    const SectionInfo* currentSec = nullptr;
+    for (const auto& sec : book.sections) {
+        if (sec.index == _reading_section) {
+            currentSec = &sec;
+            break;
+        }
+    }
     
-    const SectionInfo& currentSec = book.sections[currentSectionIdx];
+    if (!currentSec) {
+        mclog::tagError(getAppInfo().name, "Current section {} not found", _reading_section);
+        return;
+    }
     
-    if (_reading_page < currentSec.pageCount) {
+    if (_reading_page < currentSec->pageCount) {
         // 当前章节还有下一页
         _reading_page++;
-    } else if (_reading_section < (int)book.sections.size()) {
-        // 跳转到下一章节
-        _reading_section++;
-        _reading_page = 1;
     } else {
-        // 已经是最后一页
-        mclog::tagInfo(getAppInfo().name, "Already at last page");
-        return;
+        // 跳转到下一章节
+        bool foundNext = false;
+        for (const auto& sec : book.sections) {
+            if (sec.index > _reading_section) {
+                _reading_section = sec.index;
+                _reading_page = 1;
+                foundNext = true;
+                break;
+            }
+        }
+        
+        if (!foundNext) {
+            // 已经是最后一页
+            mclog::tagInfo(getAppInfo().name, "Already at last page");
+            return;
+        }
     }
     
     loadPage();
@@ -740,19 +821,29 @@ void AppBookshelf::prevPage()
     if (_reading_page > 1) {
         // 当前章节还有上一页
         _reading_page--;
-    } else if (_reading_section > 1) {
-        // 跳转到上一章节的最后一页
-        _reading_section--;
-        int prevSectionIdx = _reading_section - 1;
-        if (prevSectionIdx >= 0 && prevSectionIdx < (int)book.sections.size()) {
-            _reading_page = book.sections[prevSectionIdx].pageCount;
-        } else {
-            _reading_page = 1;
-        }
     } else {
-        // 已经是第一页
-        mclog::tagInfo(getAppInfo().name, "Already at first page");
-        return;
+        // 跳转到上一章节的最后一页
+        const SectionInfo* prevSec = nullptr;
+        
+        // 按index降序查找第一个小于当前section的章节
+        for (int i = book.sections.size() - 1; i >= 0; i--) {
+            if (book.sections[i].index < _reading_section) {
+                prevSec = &book.sections[i];
+                mclog::tagInfo(getAppInfo().name, 
+                              "Found prev section: index={}, pageCount={}", 
+                              prevSec->index, prevSec->pageCount);
+                break;
+            }
+        }
+        
+        if (prevSec) {
+            _reading_section = prevSec->index;
+            _reading_page = prevSec->pageCount;
+        } else {
+            // 已经是第一页
+            mclog::tagInfo(getAppInfo().name, "Already at first page");
+            return;
+        }
     }
     
     loadPage();
@@ -770,7 +861,19 @@ void AppBookshelf::gotoSection(int sectionIndex)
     if (_selected_book < 0) return;
     const BookInfo& book = _books[_selected_book];
     
-    if (sectionIndex < 1 || sectionIndex > (int)book.sections.size()) return;
+    // 验证章节索引是否有效（章节从 0 开始）
+    bool validSection = false;
+    for (const auto& sec : book.sections) {
+        if (sec.index == sectionIndex) {
+            validSection = true;
+            break;
+        }
+    }
+    
+    if (!validSection) {
+        mclog::tagError(getAppInfo().name, "Invalid section index: {}", sectionIndex);
+        return;
+    }
     
     mclog::tagInfo(getAppInfo().name, "Goto section {}", sectionIndex);
     
@@ -847,6 +950,236 @@ int AppBookshelf::getCurrentGlobalPage()
         }
     }
     return current;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              链接处理功能                                  */
+/* -------------------------------------------------------------------------- */
+
+void AppBookshelf::loadPageLinks()
+{
+    _current_page_links.clear();
+    _current_page_has_image = false;  // 默认无图片
+    
+    if (_selected_book < 0) return;
+    const BookInfo& book = _books[_selected_book];
+    
+    // 构建 links.json 路径
+    char linksPath[256];
+    snprintf(linksPath, sizeof(linksPath), 
+             "/sdcard/books/%s/sections/%03d/links.json",
+             book.id.c_str(), _reading_section);
+    
+    // 检查文件是否存在
+    FILE* f = fopen(linksPath, "r");
+    if (!f) {
+        // 文件不存在是正常的，说明这个章节没有链接
+        return;
+    }
+    
+    // 读取文件内容
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    char* buffer = (char*)malloc(size + 1);
+    fread(buffer, 1, size, f);
+    buffer[size] = '\0';
+    fclose(f);
+    
+    // 解析 JSON
+    cJSON* json = cJSON_Parse(buffer);
+    free(buffer);
+    
+    if (!json) {
+        mclog::tagError(getAppInfo().name, "Failed to parse links.json");
+        return;
+    }
+    
+    // 获取 pages 数组
+    cJSON* pagesArray = cJSON_GetObjectItem(json, "pages");
+    if (!pagesArray) {
+        cJSON_Delete(json);
+        return;
+    }
+    
+    // 查找当前页面
+    int arraySize = cJSON_GetArraySize(pagesArray);
+    for (int i = 0; i < arraySize; i++) {
+        cJSON* pageItem = cJSON_GetArrayItem(pagesArray, i);
+        cJSON* pageNum = cJSON_GetObjectItem(pageItem, "page");
+        
+        if (pageNum && pageNum->valueint == _reading_page) {
+            // 找到当前页面，解析 hasImage 和链接
+            cJSON* hasImageItem = cJSON_GetObjectItem(pageItem, "hasImage");
+            if (hasImageItem && cJSON_IsBool(hasImageItem)) {
+                _current_page_has_image = cJSON_IsTrue(hasImageItem);
+            }
+            
+            cJSON* linksArray = cJSON_GetObjectItem(pageItem, "links");
+            if (linksArray) {
+                int linkCount = cJSON_GetArraySize(linksArray);
+                for (int j = 0; j < linkCount; j++) {
+                    cJSON* linkItem = cJSON_GetArrayItem(linksArray, j);
+                    
+                    LinkInfo link;
+                    
+                    // 解析基本信息
+                    cJSON* text = cJSON_GetObjectItem(linkItem, "text");
+                    cJSON* rect = cJSON_GetObjectItem(linkItem, "rect");
+                    cJSON* href = cJSON_GetObjectItem(linkItem, "href");
+                    cJSON* type = cJSON_GetObjectItem(linkItem, "type");
+                    
+                    if (text) link.text = text->valuestring;
+                    if (href) link.href = href->valuestring;
+                    if (type) link.type = type->valuestring;
+                    
+                    // 解析矩形区域
+                    if (rect) {
+                        cJSON* x = cJSON_GetObjectItem(rect, "x");
+                        cJSON* y = cJSON_GetObjectItem(rect, "y");
+                        cJSON* w = cJSON_GetObjectItem(rect, "width");
+                        cJSON* h = cJSON_GetObjectItem(rect, "height");
+                        
+                        link.x = x ? x->valueint : 0;
+                        link.y = y ? y->valueint : 0;
+                        link.w = w ? w->valueint : 0;
+                        link.h = h ? h->valueint : 0;
+                    }
+                    
+                    // 解析目标位置（内部链接）
+                    if (link.type == "internal") {
+                        cJSON* target = cJSON_GetObjectItem(linkItem, "target");
+                        if (target) {
+                            cJSON* sec = cJSON_GetObjectItem(target, "section");
+                            cJSON* page = cJSON_GetObjectItem(target, "page");
+                            link.targetSection = sec ? sec->valueint : 0;
+                            link.targetPage = page ? page->valueint : 0;
+                        }
+                    }
+                    
+                    _current_page_links.push_back(link);
+                }
+                
+                mclog::tagInfo(getAppInfo().name, 
+                              "Loaded {} links for section {}, page {}", 
+                              _current_page_links.size(), _reading_section, _reading_page);
+            }
+            break;
+        }
+    }
+    
+    cJSON_Delete(json);
+}
+
+void AppBookshelf::drawLinkIndicators()
+{
+    if (_current_page_links.empty()) return;
+    
+    auto& lcd = GetHAL().display;
+    
+    // 使用浅灰色绘制链接下划线
+    lcd.setColor(0xAAAAAA);
+    
+    for (const auto& link : _current_page_links) {
+        // 在链接文本下方绘制1像素的下划线
+        int underlineY = link.y + link.h - 2;
+        lcd.drawLine(link.x, underlineY, link.x + link.w, underlineY);
+        
+        // 可选：在链接周围绘制虚线边框（用于调试）
+        // lcd.drawRect(link.x, link.y, link.w, link.h);
+    }
+}
+
+bool AppBookshelf::handleLinkTouch(int x, int y)
+{
+    if (_current_page_links.empty()) return false;
+    
+    // 检查触摸点是否在任何链接区域内
+    for (const auto& link : _current_page_links) {
+        // Y轴扩展5像素容错
+        int expandY = 5;
+        if (x >= link.x && x <= (link.x + link.w) &&
+            y >= (link.y - expandY) && y <= (link.y + link.h + expandY)) {
+            
+            mclog::tagInfo(getAppInfo().name, 
+                          "Link clicked: type={}, href={}", 
+                          link.type, link.href);
+            
+            if (link.type == "internal") {
+                // 内部跳转
+                if (link.targetSection > 0 && link.targetPage > 0) {
+                    _reading_section = link.targetSection;
+                    _reading_page = link.targetPage;
+                    
+                    freePageImage();
+                    loadPage();
+                    _need_redraw = true;
+                    
+                    mclog::tagInfo(getAppInfo().name, 
+                                  "Jump to section {}, page {}", 
+                                  _reading_section, _reading_page);
+                    return true;
+                }
+            } else if (link.type == "external") {
+                // 外部链接，显示提示
+                auto& lcd = GetHAL().display;
+                lcd.setEpdMode(epd_fastest);
+                
+                // 在屏幕中央显示提示框
+                int boxW = 400;
+                int boxH = 150;
+                int boxX = (SCREEN_WIDTH - boxW) / 2;
+                int boxY = (PAGE_CONTENT_HEIGHT - boxH) / 2;
+                
+                lcd.fillRect(boxX, boxY, boxW, boxH, COLOR_BG);
+                lcd.drawRect(boxX, boxY, boxW, boxH, COLOR_BORDER);
+                
+                lcd.setFont(&fonts::efontCN_16_b);
+                lcd.setTextColor(COLOR_TEXT);
+                lcd.setTextDatum(middle_center);
+                lcd.drawString("外部链接", SCREEN_WIDTH / 2, boxY + 40);
+                lcd.drawString("设备不支持访问", SCREEN_WIDTH / 2, boxY + 70);
+                lcd.drawString("点击任意处继续", SCREEN_WIDTH / 2, boxY + 100);
+                
+                lcd.display();
+                
+                // 等待触摸后恢复
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                _need_redraw = true;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+void AppBookshelf::jumpToAnchor(const std::string& anchor)
+{
+    if (_selected_book < 0) return;
+    const BookInfo& book = _books[_selected_book];
+    
+    // 查找锚点
+    auto it = book.anchorMap.find(anchor);
+    if (it != book.anchorMap.end()) {
+        int targetSection = it->second.first;
+        int targetPage = it->second.second;
+        
+        mclog::tagInfo(getAppInfo().name, 
+                      "Jump to anchor '{}' -> section {}, page {}", 
+                      anchor, targetSection, targetPage);
+        
+        _reading_section = targetSection;
+        _reading_page = targetPage;
+        
+        freePageImage();
+        loadPage();
+        _need_redraw = true;
+    } else {
+        mclog::tagWarn(getAppInfo().name, 
+                      "Anchor '{}' not found in anchorMap", anchor);
+    }
 }
 
 void AppBookshelf::freeBookCovers()

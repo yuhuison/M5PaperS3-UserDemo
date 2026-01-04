@@ -1,21 +1,14 @@
 /**
  * EpubToImages - EPUB 电子书转换为 PNG 图片组件
  * 
- * 流程：
- * 1. 加载 EPUB 解析章节
- * 2. 点击"开始转换"渲染所有页面（可预览）
- * 3. 确认后点击"上传到设备"
+ * 使用 CanvasRenderer 进行分页渲染，避免 OOM
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import ePub, { Book, NavItem } from 'epubjs';
+import { renderToPages, RenderConfig, PAGE_WIDTH, PAGE_HEIGHT, PageLinks } from './CanvasRenderer';
 import type { IDeviceClient } from '../api/index';
 import './EpubToImages.css';
-
-// M5PaperS3 屏幕尺寸
-const SCREEN_WIDTH = 540;
-const SCREEN_HEIGHT = 960;
-const CONTENT_HEIGHT = 900;
 
 interface EpubToImagesProps {
   file: File;
@@ -24,20 +17,17 @@ interface EpubToImagesProps {
   client?: IDeviceClient;
 }
 
-interface RenderConfig {
-  fontFamily: string;
-  fontSize: number;
-  lineHeight: number;
-  paddingH: number;
-  paddingV: number;
-}
-
 const DEFAULT_CONFIG: RenderConfig = {
-  fontFamily: 'serif',
-  fontSize: 28,
+  fontFamily: 'Noto Sans SC, Microsoft YaHei, serif',
+  fontSize: 24,
+  fontWeight: 400,
   lineHeight: 1.6,
-  paddingH: 24,
-  paddingV: 20,
+  paddingH: 20,
+  paddingV: 15,
+  textColor: '#000000',
+  backgroundColor: '#ffffff',
+  imageGrayscale: true,  // 永远启用灰度转换
+  grayscaleLevels: 16,   // 默认16级灰度
 };
 
 interface ChapterInfo {
@@ -56,8 +46,10 @@ interface ConvertedBook {
     index: number;
     title: string;
     pages: Blob[];
+    pageLinks?: PageLinks[];
   }>;
   totalPages: number;
+  anchorMap?: Record<string, { section: number; page: number }>;
 }
 
 type ProcessStatus = 'idle' | 'loading' | 'converting' | 'converted' | 'uploading' | 'completed' | 'error';
@@ -81,10 +73,14 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     total: 0,
   });
   
-  // 转换结果
   const [convertedBook, setConvertedBook] = useState<ConvertedBook | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [allPages, setAllPages] = useState<Array<{ sectionIdx: number; pageIdx: number; blob: Blob }>>([]);
+  
+  // 调试相关状态
+  const [showDebugModal, setShowDebugModal] = useState<boolean>(false);
+  const [debugHtml, setDebugHtml] = useState<string>('');
+  const [debugChapterIndex, setDebugChapterIndex] = useState<number>(0);
   
   const bookRef = useRef<Book | null>(null);
   const abortRef = useRef<boolean>(false);
@@ -94,6 +90,16 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     const timestamp = Date.now().toString(36);
     const random = Math.random().toString(36).substring(2, 8);
     return `book_${timestamp}_${random}`;
+  };
+
+  // Blob 转 DataURL
+  const blobToDataUrl = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   };
 
   // 加载 EPUB 文件
@@ -114,43 +120,23 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
         setBookAuthor(metadata.creator || '');
         
         const navigation = await book.loaded.navigation;
-        console.log('EPUB 导航:', navigation);
-        
-        const chapterList: ChapterInfo[] = [];
         const toc = navigation.toc || [];
+        const chapterList: ChapterInfo[] = [];
         
-        if (toc.length > 0) {
-          const flattenToc = (items: NavItem[], _depth = 0) => {
-            items.forEach((item) => {
-              chapterList.push({
-                index: chapterList.length,
-                title: item.label?.trim() || `章节 ${chapterList.length + 1}`,
-                href: item.href,
-              });
-              if (item.subitems && item.subitems.length > 0) {
-                flattenToc(item.subitems, _depth + 1);
-              }
-            });
-          };
-          flattenToc(toc);
-        }
+        // 从 spine 获取章节（更可靠）
+        const spineItems = (book.spine as any).spineItems || [];
+        console.log('Spine items:', spineItems.length);
         
-        // 如果 TOC 为空，从 spine 获取
-        if (chapterList.length === 0) {
-          console.log('TOC 为空，从 spine 获取章节');
-          const spine = book.spine as any;
-          if (spine && spine.items) {
-            spine.items.forEach((item: any, idx: number) => {
-              chapterList.push({
-                index: idx,
-                title: item.idref || `章节 ${idx + 1}`,
-                href: item.href,
-              });
-            });
-          }
-        }
+        spineItems.forEach((item: any, idx: number) => {
+          const tocItem = toc.find((t: NavItem) => item.href?.includes(t.href.split('#')[0]));
+          chapterList.push({
+            index: idx,
+            title: tocItem?.label?.trim() || `章节 ${idx + 1}`,
+            href: item.href,
+          });
+        });
         
-        console.log('解析到的章节:', chapterList);
+        console.log('解析到的章节:', chapterList.length);
         setChapters(chapterList);
         setProgress({ status: 'idle', message: `已加载 ${chapterList.length} 个章节`, current: 0, total: chapterList.length });
       } catch (error) {
@@ -173,410 +159,243 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     };
   }, [file]);
 
-  // 将 blob URL 图片转换为 base64
-  const convertImageToBase64 = async (imgSrc: string, book: Book): Promise<string> => {
-    try {
-      // 如果已经是 base64 或 data URL，直接返回
-      if (imgSrc.startsWith('data:')) {
-        return imgSrc;
-      }
-      
-      // 使用 epub.js 的资源加载器获取图片
-      const archive = (book as any).archive;
-      if (!archive) {
-        console.warn('无法访问 EPUB archive');
-        return imgSrc;
-      }
-      
-      // 处理相对路径
-      let imagePath = imgSrc;
-      if (imgSrc.startsWith('blob:')) {
-        // blob URL 无法直接处理，跳过
-        return imgSrc;
-      }
-      
-      // 尝试从 archive 加载图片
-      const imageBlob = await archive.getBlob(imagePath);
-      if (imageBlob) {
-        return new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.onerror = () => resolve(imgSrc);
-          reader.readAsDataURL(imageBlob);
-        });
-      }
-      
-      return imgSrc;
-    } catch (error) {
-      console.warn('转换图片失败:', imgSrc, error);
-      return imgSrc;
-    }
-  };
-
-  // 获取章节 HTML 并处理图片
-  const getChapterHtml = async (book: Book, href: string): Promise<string> => {
-    try {
-      let section = book.spine.get(href);
-      if (!section) {
-        const spineItems = book.spine as any;
-        for (const item of spineItems.items || []) {
-          if (item.href === href || item.href.includes(href) || href.includes(item.href)) {
-            section = item;
-            break;
-          }
-        }
-      }
-      
-      if (!section) return '';
-      
-      await section.load(book.load.bind(book));
-      const doc = section.document;
-      if (!doc?.body) return '';
-      
-      // 获取基础路径用于解析相对图片路径
-      const sectionHref = (section as any).href || href;
-      const basePath = sectionHref.substring(0, sectionHref.lastIndexOf('/') + 1);
-      
-      // 处理所有图片，转换为 base64
-      const images = doc.querySelectorAll('img');
-      for (const img of images) {
-        const src = img.getAttribute('src');
-        if (src) {
-          // 构建完整路径
-          let fullPath = src;
-          if (!src.startsWith('data:') && !src.startsWith('http') && !src.startsWith('blob:')) {
-            fullPath = basePath + src;
-            // 处理 ../ 相对路径
-            fullPath = fullPath.replace(/[^/]+\/\.\.\//g, '');
-          }
-          
-          try {
-            const archive = (book as any).archive;
-            if (archive) {
-              const imageBlob = await archive.getBlob(fullPath);
-              if (imageBlob) {
-                const base64 = await new Promise<string>((resolve) => {
-                  const reader = new FileReader();
-                  reader.onloadend = () => resolve(reader.result as string);
-                  reader.onerror = () => resolve('');
-                  reader.readAsDataURL(imageBlob);
-                });
-                if (base64) {
-                  img.setAttribute('src', base64);
-                }
-              }
-            }
-          } catch (e) {
-            console.warn('处理图片失败:', fullPath, e);
-          }
-        }
-      }
-      
-      return doc.body.innerHTML;
-    } catch (error) {
-      console.warn('获取章节内容失败:', href, error);
-      return '';
-    }
-  };
-
-  // 文本换行
-  const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] => {
-    const lines: string[] = [];
-    const paragraphs = text.split('\n');
+  // 处理 HTML 中的图片资源（将图片转换为 base64）
+  const processHtmlWithResources = useCallback(async (html: string, sectionHref: string, book: Book) => {
+    const archive = book.archive as any;
+    let basePrefix = '';
     
-    for (const paragraph of paragraphs) {
-      if (paragraph.trim() === '') {
-        lines.push('');
-        continue;
-      }
-      
-      let currentLine = '';
-      const chars = paragraph.split('');
-      
-      for (const char of chars) {
-        const testLine = currentLine + char;
-        const metrics = ctx.measureText(testLine);
-        
-        if (metrics.width > maxWidth && currentLine !== '') {
-          lines.push(currentLine);
-          currentLine = char;
-        } else {
-          currentLine = testLine;
-        }
-      }
-      
-      if (currentLine) {
-        lines.push(currentLine);
+    // 找到正确的基础路径
+    if (archive && archive.zip) {
+      const allFiles = Object.keys(archive.zip.files || {});
+      const sectionFile = allFiles.find(f => f.endsWith(sectionHref) || f.endsWith('/' + sectionHref));
+      if (sectionFile) {
+        basePrefix = sectionFile.substring(0, sectionFile.length - sectionHref.length);
       }
     }
     
-    return lines;
-  };
-
-  // 渲染页面到 Canvas（支持文本和图片）
-  const renderPageToBlob = async (
-    elements: Element[],
-    cfg: RenderConfig
-  ): Promise<Blob> => {
-    const canvas = document.createElement('canvas');
-    canvas.width = SCREEN_WIDTH;
-    canvas.height = SCREEN_HEIGHT;
-    const ctx = canvas.getContext('2d')!;
+    const sectionDir = sectionHref.substring(0, sectionHref.lastIndexOf('/') + 1);
     
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    
-    ctx.font = `${cfg.fontSize}px ${cfg.fontFamily}`;
-    ctx.fillStyle = '#000000';
-    ctx.textBaseline = 'top';
-    
-    let y = cfg.paddingV;
-    const lineHeight = cfg.fontSize * cfg.lineHeight;
-    const maxWidth = SCREEN_WIDTH - cfg.paddingH * 2;
-    
-    for (const el of elements) {
-      // 检查是否是图片元素
-      if (el.tagName === 'IMG') {
-        const img = el as HTMLImageElement;
-        const src = img.getAttribute('src') || '';
-        
-        if (src.startsWith('data:')) {
-          try {
-            // 创建图片对象并绘制
-            const imgObj = new Image();
-            await new Promise<void>((resolve, reject) => {
-              imgObj.onload = () => resolve();
-              imgObj.onerror = () => reject(new Error('图片加载失败'));
-              imgObj.src = src;
-            });
-            
-            // 计算图片尺寸，限制最大宽度
-            let imgWidth = imgObj.width;
-            let imgHeight = imgObj.height;
-            if (imgWidth > maxWidth) {
-              imgHeight = (maxWidth / imgWidth) * imgHeight;
-              imgWidth = maxWidth;
-            }
-            
-            // 检查是否超出页面
-            if (y + imgHeight > SCREEN_HEIGHT - cfg.paddingV) {
-              // 图片太大，跳过或缩放
-              const availableHeight = SCREEN_HEIGHT - cfg.paddingV - y;
-              if (availableHeight > 50) {
-                imgHeight = availableHeight;
-                imgWidth = (availableHeight / imgObj.height) * imgObj.width;
-              } else {
-                continue;
-              }
-            }
-            
-            ctx.drawImage(imgObj, cfg.paddingH, y, imgWidth, imgHeight);
-            y += imgHeight + lineHeight * 0.5;
-          } catch (e) {
-            console.warn('绘制图片失败:', e);
-          }
+    // 解析相对路径
+    const resolveImagePath = (src: string): string => {
+      let resolved = '';
+      if (src.startsWith('../')) {
+        const parts = sectionDir.split('/').filter(p => p);
+        const srcParts = src.split('/');
+        let upCount = 0;
+        for (const part of srcParts) {
+          if (part === '..') upCount++;
+          else break;
         }
+        const baseParts = parts.slice(0, parts.length - upCount);
+        const fileParts = srcParts.slice(upCount);
+        resolved = [...baseParts, ...fileParts].join('/');
+      } else if (!src.startsWith('/')) {
+        resolved = sectionDir + src;
       } else {
-        // 文本元素
-        const text = el.textContent || '';
-        if (text.trim()) {
-          const lines = wrapText(ctx, text, maxWidth);
-          
-          for (const line of lines) {
-            if (y + lineHeight > SCREEN_HEIGHT - cfg.paddingV) break;
-            ctx.fillText(line, cfg.paddingH, y);
-            y += lineHeight;
+        resolved = src;
+      }
+      return basePrefix + resolved;
+    };
+
+    // 从 archive 获取图片 blob
+    const getImageBlob = async (imagePath: string): Promise<Blob | null> => {
+      try {
+        const blob = await book.archive.getBlob(imagePath);
+        if (blob && blob.size > 0) return blob;
+      } catch (e) {
+        // 继续尝试方法2
+      }
+      
+      const zipFile = archive?.zip?.files?.[imagePath];
+      if (zipFile) {
+        try {
+          const uint8Array = await zipFile.async('uint8array');
+          const mimeType = imagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+          return new Blob([uint8Array], { type: mimeType });
+        } catch (e) {
+          console.warn('zip 提取失败:', e);
+        }
+      }
+      return null;
+    };
+
+    // 正则匹配所有图片
+    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    const svgImageRegex = /<image[^>]+(?:xlink:)?href=["']([^"']+)["'][^>]*\/?>/gi;
+    
+    let processedHtml = html;
+    
+    // 处理 img 标签
+    const imgMatches = [...html.matchAll(imgRegex)];
+    for (const match of imgMatches) {
+      const fullTag = match[0];
+      const src = match[1];
+      
+      if (src && !src.startsWith('data:') && !src.startsWith('http')) {
+        try {
+          const imagePath = resolveImagePath(src);
+          const blob = await getImageBlob(imagePath);
+          if (blob) {
+            const dataUrl = await blobToDataUrl(blob);
+            const newTag = fullTag.replace(src, dataUrl);
+            processedHtml = processedHtml.replace(fullTag, newTag);
+            console.log('图片转换成功:', src);
           }
-          y += lineHeight * 0.3;
+        } catch (e) {
+          console.warn('无法加载图片:', src, e);
         }
       }
     }
     
-    return new Promise<Blob>((resolve) => {
-      canvas.toBlob((blob) => resolve(blob!), 'image/png');
-    });
+    // 处理 SVG image 标签
+    const svgMatches = [...html.matchAll(svgImageRegex)];
+    for (const match of svgMatches) {
+      const fullTag = match[0];
+      const src = match[1];
+      
+      if (src && !src.startsWith('data:') && !src.startsWith('http')) {
+        try {
+          const imagePath = resolveImagePath(src);
+          const blob = await getImageBlob(imagePath);
+          if (blob) {
+            const dataUrl = await blobToDataUrl(blob);
+            const newTag = fullTag.replace(src, dataUrl);
+            processedHtml = processedHtml.replace(fullTag, newTag);
+          }
+        } catch (e) {
+          console.warn('无法加载 SVG image:', src, e);
+        }
+      }
+    }
+
+    return processedHtml;
+  }, []);
+
+  // 从 EPUB 提取封面图片
+  const extractCoverFromEpub = async (book: Book): Promise<Blob | null> => {
+    try {
+      // 尝试获取封面 URL
+      const coverUrl = await book.coverUrl();
+      if (!coverUrl) {
+        console.log('EPUB 没有封面元数据，尝试从文件中查找');
+        return null;
+      }
+      
+      // 加载封面图片
+      const response = await fetch(coverUrl);
+      const blob = await response.blob();
+      
+      // 如果是 JPEG/PNG，转换为适合 E-Ink 的灰度图
+      return await convertImageForEink(blob);
+    } catch (error) {
+      console.error('提取封面失败:', error);
+      return null;
+    }
   };
 
-  // 渲染 HTML 到多页
-  const renderHtmlToPages = async (html: string, cfg: RenderConfig): Promise<Blob[]> => {
-    const contentWidth = SCREEN_WIDTH - cfg.paddingH * 2;
-    const contentHeight = CONTENT_HEIGHT - cfg.paddingV * 2;
-    
-    const container = document.createElement('div');
-    container.style.cssText = `
-      position: fixed;
-      left: -9999px;
-      top: 0;
-      width: ${contentWidth}px;
-      font-family: ${cfg.fontFamily};
-      font-size: ${cfg.fontSize}px;
-      line-height: ${cfg.lineHeight};
-      color: #000;
-      background: #fff;
-    `;
-    container.innerHTML = html;
-    document.body.appendChild(container);
-    
-    // 等待所有 base64 图片加载完成
-    const images = container.querySelectorAll('img');
-    console.log(`章节包含 ${images.length} 张图片`);
-    
-    for (const img of images) {
-      const src = img.getAttribute('src') || '';
-      console.log('图片 src:', src.substring(0, 50) + '...');
-      
-      if (src.startsWith('data:')) {
-        // base64 图片，等待加载
-        await new Promise<void>((resolve) => {
-          if (img.complete && img.naturalWidth > 0) {
-            resolve();
-          } else {
-            img.onload = () => resolve();
-            img.onerror = () => {
-              console.warn('图片加载失败');
-              resolve();
-            };
-          }
-        });
-      }
-      img.style.maxWidth = `${contentWidth}px`;
-      img.style.height = 'auto';
-      img.style.display = 'block';
-    }
-    
-    // 收集所有可渲染元素（文本段落和图片）
-    const elements: Element[] = [];
-    
-    // 递归收集元素
-    const collectElements = (node: Element) => {
-      // 如果是图片，直接添加
-      if (node.tagName === 'IMG') {
-        elements.push(node);
-        return;
-      }
-      
-      // 如果是文本块元素
-      if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(node.tagName)) {
-        // 检查是否包含图片
-        const childImgs = node.querySelectorAll('img');
-        if (childImgs.length > 0) {
-          // 分别处理文本和图片
-          childImgs.forEach(img => elements.push(img));
+  // 将图片转换为适合 E-Ink 的格式（灰度、压缩）
+  const convertImageForEink = async (imageBlob: Blob): Promise<Blob> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const COVER_SIZE = 160;
+        
+        // 1. 计算缩放比例：让短边等于 160
+        const scale = COVER_SIZE / Math.min(img.width, img.height);
+        const scaledWidth = Math.round(img.width * scale);
+        const scaledHeight = Math.round(img.height * scale);
+        
+        // 2. 创建临时 canvas 进行缩放
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = scaledWidth;
+        tempCanvas.height = scaledHeight;
+        const tempCtx = tempCanvas.getContext('2d')!;
+        tempCtx.drawImage(img, 0, 0, scaledWidth, scaledHeight);
+        
+        // 3. 创建最终 160x160 canvas，从左上角裁剪
+        const canvas = document.createElement('canvas');
+        canvas.width = COVER_SIZE;
+        canvas.height = COVER_SIZE;
+        const ctx = canvas.getContext('2d')!;
+        
+        // 从缩放后的图片左上角裁剪 160x160
+        ctx.drawImage(tempCanvas, 0, 0, COVER_SIZE, COVER_SIZE, 0, 0, COVER_SIZE, COVER_SIZE);
+        const imageData = ctx.getImageData(0, 0, COVER_SIZE, COVER_SIZE);
+        const data = imageData.data;
+        
+        // 4. 16 级灰度转换
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+          const level = Math.round(gray / 255 * 15);
+          const finalGray = Math.round(level / 15 * 255);
+          data[i] = data[i + 1] = data[i + 2] = finalGray;
         }
-        elements.push(node);
-        return;
-      }
-      
-      // 递归处理子元素
-      for (const child of node.children) {
-        collectElements(child);
-      }
-    };
-    
-    collectElements(container);
-    
-    // 如果没有收集到元素，尝试使用原始选择器
-    if (elements.length === 0) {
-      const fallback = container.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div > img, img');
-      fallback.forEach(el => elements.push(el));
-    }
-    
-    console.log(`收集到 ${elements.length} 个可渲染元素`);
-    
-    const pages: Blob[] = [];
-    let currentPageContent: Element[] = [];
-    let currentHeight = 0;
-    
-    for (const el of elements) {
-      const clone = el.cloneNode(true) as Element;
-      
-      // 测量元素高度
-      const measureDiv = document.createElement('div');
-      measureDiv.style.cssText = container.style.cssText;
-      measureDiv.style.width = `${contentWidth}px`;
-      measureDiv.appendChild(clone.cloneNode(true));
-      document.body.appendChild(measureDiv);
-      
-      const height = measureDiv.offsetHeight;
-      document.body.removeChild(measureDiv);
-      
-      if (currentHeight + height > contentHeight && currentPageContent.length > 0) {
-        const pageBlob = await renderPageToBlob(currentPageContent, cfg);
-        pages.push(pageBlob);
-        currentPageContent = [];
-        currentHeight = 0;
-      }
-      
-      currentPageContent.push(clone);
-      currentHeight += height;
-    }
-    
-    if (currentPageContent.length > 0) {
-      const pageBlob = await renderPageToBlob(currentPageContent, cfg);
-      pages.push(pageBlob);
-    }
-    
-    document.body.removeChild(container);
-    
-    if (pages.length === 0) {
-      const canvas = document.createElement('canvas');
-      canvas.width = SCREEN_WIDTH;
-      canvas.height = SCREEN_HEIGHT;
-      const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-      const blob = await new Promise<Blob>((resolve) => {
-        canvas.toBlob((b) => resolve(b!), 'image/png');
-      });
-      pages.push(blob);
-    }
-    
-    return pages;
+        
+        ctx.putImageData(imageData, 0, 0);
+        canvas.toBlob((blob) => resolve(blob!), 'image/png', 1.0);
+      };
+      img.src = URL.createObjectURL(imageBlob);
+    });
   };
 
   // 生成封面
   const generateCover = async (title: string, author: string): Promise<Blob> => {
     const canvas = document.createElement('canvas');
-    canvas.width = SCREEN_WIDTH;
-    canvas.height = SCREEN_HEIGHT;
+    canvas.width = PAGE_WIDTH;
+    canvas.height = PAGE_HEIGHT;
     const ctx = canvas.getContext('2d')!;
     
-    const gradient = ctx.createLinearGradient(0, 0, 0, SCREEN_HEIGHT);
-    gradient.addColorStop(0, '#f5f5f5');
-    gradient.addColorStop(1, '#e0e0e0');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
     
+    // 装饰线
     ctx.strokeStyle = '#333333';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(60, 200);
-    ctx.lineTo(SCREEN_WIDTH - 60, 200);
+    ctx.moveTo(60, 150);
+    ctx.lineTo(PAGE_WIDTH - 60, 150);
     ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(60, SCREEN_HEIGHT - 200);
-    ctx.lineTo(SCREEN_WIDTH - 60, SCREEN_HEIGHT - 200);
+    ctx.moveTo(60, PAGE_HEIGHT - 150);
+    ctx.lineTo(PAGE_WIDTH - 60, PAGE_HEIGHT - 150);
     ctx.stroke();
     
+    // 标题
     ctx.fillStyle = '#1a1a1a';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
-    const titleFontSize = Math.min(48, SCREEN_WIDTH / (title.length * 0.8));
+    const titleFontSize = Math.min(48, PAGE_WIDTH / (title.length * 0.8));
     ctx.font = `bold ${titleFontSize}px serif`;
     
-    const maxTitleWidth = SCREEN_WIDTH - 80;
-    const titleLines = wrapText(ctx, title, maxTitleWidth);
-    const titleStartY = SCREEN_HEIGHT / 2 - (titleLines.length * titleFontSize * 1.2) / 2;
+    // 换行处理
+    const maxWidth = PAGE_WIDTH - 80;
+    const words = title.split('');
+    const lines: string[] = [];
+    let currentLine = '';
     
-    titleLines.forEach((line, i) => {
-      ctx.fillText(line, SCREEN_WIDTH / 2, titleStartY + i * titleFontSize * 1.2);
+    for (const char of words) {
+      const testLine = currentLine + char;
+      if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = char;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    
+    const lineHeight = titleFontSize * 1.2;
+    const startY = PAGE_HEIGHT / 2 - (lines.length * lineHeight) / 2;
+    lines.forEach((line, i) => {
+      ctx.fillText(line, PAGE_WIDTH / 2, startY + i * lineHeight);
     });
     
+    // 作者
     if (author) {
       ctx.font = '24px serif';
       ctx.fillStyle = '#666666';
-      ctx.fillText(author, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 150);
+      ctx.fillText(author, PAGE_WIDTH / 2, PAGE_HEIGHT - 100);
     }
     
     return new Promise<Blob>((resolve) => {
@@ -584,7 +403,7 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     });
   };
 
-  // 第一步：开始转换（只渲染，不上传）
+  // 开始转换
   const startConversion = async () => {
     if (!bookRef.current) return;
     
@@ -593,14 +412,24 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     const bookId = generateBookId();
     
     try {
-      setProgress({ status: 'converting', message: '正在生成封面...', current: 0, total: chapters.length + 1 });
-      const coverBlob = await generateCover(bookTitle, bookAuthor);
+      // 1. 提取真实封面（优先使用 EPUB 封面）
+      setProgress({ status: 'converting', message: '正在提取封面...', current: 0, total: chapters.length + 1 });
+      let coverBlob = await extractCoverFromEpub(book);
+      if (!coverBlob) {
+        console.log('EPUB 没有封面，生成默认封面');
+        coverBlob = await generateCover(bookTitle, bookAuthor);
+      }
       
-      const sectionsData: Array<{ index: number; title: string; pages: Blob[] }> = [];
+      const sectionsData: Array<{ 
+        index: number; 
+        title: string; 
+        pages: Blob[];
+        pageLinks: PageLinks[];
+      }> = [];
       const pagesList: Array<{ sectionIdx: number; pageIdx: number; blob: Blob }> = [];
+      const globalAnchorMap = new Map<string, { section: number; page: number }>();
       
-      // 封面作为第一页预览
-      pagesList.push({ sectionIdx: -1, pageIdx: 0, blob: coverBlob });
+      // 注意：封面不放入 pagesList，因为它不是阅读页面
       
       for (let i = 0; i < chapters.length; i++) {
         if (abortRef.current) throw new Error('用户取消');
@@ -608,32 +437,79 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
         const chapter = chapters[i];
         setProgress({
           status: 'converting',
-          message: `正在渲染: ${chapter.title}`,
+          message: `正在渲染: ${chapter.title} (${i + 1}/${chapters.length})`,
           current: i + 1,
           total: chapters.length + 1,
         });
         
-        const html = await getChapterHtml(book, chapter.href);
-        if (!html) {
-          console.warn(`章节 ${chapter.title} 内容为空，跳过`);
-          continue;
+        try {
+          // 获取章节内容
+          const section = book.spine.get(chapter.index);
+          if (!section) {
+            console.warn(`章节 ${i} 不存在`);
+            continue;
+          }
+          
+          const contents = await section.load((book as any).load.bind(book));
+          const serializer = new XMLSerializer();
+          let html = serializer.serializeToString(contents);
+          
+          // 移除 xmlns
+          if (html.includes('xmlns')) {
+            html = html.replace(/xmlns="[^"]*"/g, '');
+          }
+          
+          // 处理图片资源（转换为 base64）
+          const processedHtml = await processHtmlWithResources(html, section.href, book);
+          
+          // 检测是否有图片（检测 <img> 标签和 SVG <image> 标签）
+          const hasImages = /<img[^>]+src=/i.test(processedHtml) || 
+                           /<image[^>]+(href|xlink:href)=/i.test(processedHtml);
+          
+          // 动态调整灰度级别：有图片用16级，纯文本用2级（激进二值图）
+          const chapterConfig = {
+            ...config,
+            grayscaleLevels: hasImages ? 16 : 2,
+          };
+          
+          // 使用 CanvasRenderer 分页渲染（避免 OOM）
+          const renderResult = await renderToPages(processedHtml, chapterConfig, (msg) => {
+            setProgress(prev => ({ ...prev, message: `${chapter.title}: ${msg}` }));
+          });
+          
+          console.log(`章节 ${i + 1}: ${chapter.title}, ${renderResult.pages.length} 页, ${renderResult.pageLinks.length} 个链接页`);
+          
+          const sectionIdx = sectionsData.length;
+          const currentSection = sectionIdx + 1; // 章节索引从 1 开始
+          
+          // 处理章节内的锚点，添加到全局锚点映射
+          renderResult.anchors.forEach((anchor, key) => {
+            globalAnchorMap.set(key, {
+              section: currentSection,
+              page: anchor.page
+            });
+          });
+          
+          sectionsData.push({
+            index: sectionIdx,
+            title: chapter.title,
+            pages: renderResult.pages,
+            pageLinks: renderResult.pageLinks,
+          });
+          
+          renderResult.pages.forEach((blob, pageIdx) => {
+            pagesList.push({ sectionIdx, pageIdx, blob });
+          });
+          
+        } catch (e) {
+          console.error(`章节 ${i} 转换失败:`, e);
         }
-        
-        const pageBlobs = await renderHtmlToPages(html, config);
-        const sectionIdx = sectionsData.length;
-        
-        sectionsData.push({
-          index: sectionIdx,
-          title: chapter.title,
-          pages: pageBlobs,
-        });
-        
-        pageBlobs.forEach((blob, pageIdx) => {
-          pagesList.push({ sectionIdx, pageIdx, blob });
-        });
       }
       
       const totalPages = sectionsData.reduce((sum, s) => sum + s.pages.length, 0);
+      
+      // 转换锚点 Map 为普通对象
+      const anchorMapObj = Object.fromEntries(globalAnchorMap);
       
       setConvertedBook({
         bookId,
@@ -642,6 +518,7 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
         cover: coverBlob,
         sections: sectionsData,
         totalPages,
+        anchorMap: anchorMapObj,
       });
       
       setAllPages(pagesList);
@@ -669,7 +546,7 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     }
   };
 
-  // 第二步：上传到设备
+  // 上传到设备
   const uploadToDevice = async () => {
     if (!convertedBook || !client) {
       alert('请先连接设备并完成转换');
@@ -690,6 +567,7 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
         convertedBook.author || undefined,
         convertedBook.cover,
         convertedBook.sections,
+        convertedBook.anchorMap,
         (message: string, progressPct: number) => {
           setProgress({
             status: 'uploading',
@@ -720,7 +598,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     }
   };
 
-  // 取消操作
   const handleCancel = () => {
     if (progress.status === 'converting' || progress.status === 'uploading') {
       abortRef.current = true;
@@ -729,23 +606,61 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
     }
   };
 
-  // 配置更新
-  const updateConfig = (key: keyof RenderConfig, value: number | string) => {
+  const updateConfig = (key: keyof RenderConfig, value: number | string | boolean) => {
     setConfig(prev => ({ ...prev, [key]: value }));
-    // 配置改变后清除转换结果
     setConvertedBook(null);
     setAllPages([]);
   };
 
-  // 预览导航
   const prevPage = () => setPreviewIndex(i => Math.max(0, i - 1));
   const nextPage = () => setPreviewIndex(i => Math.min(allPages.length - 1, i + 1));
+
+  // 调试：查看章节原始 HTML
+  const viewChapterHtml = async () => {
+    if (!bookRef.current || chapters.length === 0) {
+      alert('请先加载 EPUB 文件');
+      return;
+    }
+    
+    try {
+      const book = bookRef.current;
+      const chapter = chapters[debugChapterIndex];
+      
+      const section = book.spine.get(chapter.index);
+      if (!section) {
+        alert(`章节 ${debugChapterIndex} 不存在`);
+        return;
+      }
+      
+      const contents = await section.load((book as any).load.bind(book));
+      const serializer = new XMLSerializer();
+      let html = serializer.serializeToString(contents);
+      
+      // 移除 xmlns
+      if (html.includes('xmlns')) {
+        html = html.replace(/xmlns="[^"]*"/g, '');
+      }
+      
+      setDebugHtml(html);
+      setShowDebugModal(true);
+    } catch (error) {
+      console.error('获取章节 HTML 失败:', error);
+      alert(`错误: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  };
+  
+  const copyHtmlToClipboard = () => {
+    navigator.clipboard.writeText(debugHtml).then(() => {
+      alert('HTML 已复制到剪贴板');
+    }).catch(err => {
+      console.error('复制失败:', err);
+    });
+  };
 
   const isProcessing = ['loading', 'converting', 'uploading'].includes(progress.status);
   const isConverted = progress.status === 'converted' || convertedBook !== null;
   const progressPercent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
 
-  // 当前预览图片
   const currentPreviewUrl = allPages[previewIndex] 
     ? URL.createObjectURL(allPages[previewIndex].blob) 
     : '';
@@ -763,7 +678,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
       </header>
 
       <div className="converter-content">
-        {/* 左侧：配置面板 */}
         <div className="config-panel">
           <h3>渲染设置</h3>
           
@@ -771,8 +685,8 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             <label>字体大小</label>
             <input
               type="range"
-              min="20"
-              max="40"
+              min="16"
+              max="32"
               value={config.fontSize}
               onChange={(e) => updateConfig('fontSize', Number(e.target.value))}
               disabled={isProcessing}
@@ -785,7 +699,7 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             <input
               type="range"
               min="1.2"
-              max="2.0"
+              max="2.5"
               step="0.1"
               value={config.lineHeight}
               onChange={(e) => updateConfig('lineHeight', Number(e.target.value))}
@@ -820,6 +734,15 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             <span>{config.paddingV}px</span>
           </div>
 
+          <div className="config-group">
+            <label>灰度优化</label>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              ✓ 自动灰度转换<br/>
+              ✓ 纯文本: 二值图 (2级)<br/>
+              ✓ 含图片: 16级灰度
+            </div>
+          </div>
+
           <div className="chapter-list">
             <h4>章节列表 ({chapters.length})</h4>
             <ul>
@@ -832,7 +755,36 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             </ul>
           </div>
 
-          {/* 转换信息 */}
+          {/* 调试工具 */}
+          {chapters.length > 0 && (
+            <div className="debug-panel" style={{ marginTop: '20px', padding: '12px', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
+              <h4 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#333' }}>🔍 调试工具</h4>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <select 
+                  value={debugChapterIndex} 
+                  onChange={(e) => setDebugChapterIndex(Number(e.target.value))}
+                  style={{ padding: '4px 8px', borderRadius: '3px', border: '1px solid #ddd' }}
+                >
+                  {chapters.map((ch, idx) => (
+                    <option key={idx} value={idx}>
+                      章节 {idx + 1}: {ch.title.substring(0, 30)}
+                    </option>
+                  ))}
+                </select>
+                <button 
+                  onClick={viewChapterHtml}
+                  disabled={isProcessing}
+                  style={{ padding: '4px 12px', fontSize: '13px' }}
+                >
+                  查看原始 HTML
+                </button>
+              </div>
+              <div style={{ fontSize: '11px', color: '#666', marginTop: '6px' }}>
+                可以查看 EPUB 章节的原始 HTML 代码
+              </div>
+            </div>
+          )}
+
           {convertedBook && (
             <div className="convert-info">
               <h4>转换结果</h4>
@@ -843,7 +795,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
           )}
         </div>
 
-        {/* 右侧：预览和进度 */}
         <div className="preview-panel">
           {allPages.length > 0 ? (
             <div className="preview-area">
@@ -851,7 +802,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
                 <img src={currentPreviewUrl} alt="预览" className="preview-image" />
               </div>
               
-              {/* 预览导航 */}
               <div className="preview-nav">
                 <button onClick={prevPage} disabled={previewIndex === 0}>◀ 上一页</button>
                 <span>{previewIndex + 1} / {allPages.length}</span>
@@ -865,7 +815,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             </div>
           )}
 
-          {/* 进度条 */}
           {isProcessing && (
             <div className="progress-container">
               <div className="progress-bar">
@@ -875,7 +824,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
             </div>
           )}
 
-          {/* 状态消息 */}
           {progress.status === 'error' && (
             <div className="error-message">❌ {progress.message}</div>
           )}
@@ -885,7 +833,6 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
         </div>
       </div>
 
-      {/* 底部按钮 */}
       <footer className="converter-footer">
         <button className="secondary-btn" onClick={handleCancel}>
           {isProcessing ? '取消' : '关闭'}
@@ -922,6 +869,40 @@ export function EpubToImages({ file, onClose, onComplete, client }: EpubToImages
           </>
         )}
       </footer>
+
+      {/* 调试模态框 */}
+      {showDebugModal && (
+        <div className="modal-overlay" onClick={() => setShowDebugModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '900px', maxHeight: '80vh' }}>
+            <div className="modal-header">
+              <h3>原始 HTML - 章节 {debugChapterIndex + 1}</h3>
+              <button className="close-btn" onClick={() => setShowDebugModal(false)}>×</button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: 'calc(80vh - 120px)', overflow: 'auto' }}>
+              <div style={{ marginBottom: '10px', display: 'flex', gap: '8px' }}>
+                <button onClick={copyHtmlToClipboard} style={{ padding: '6px 12px', fontSize: '13px' }}>
+                  📋 复制到剪贴板
+                </button>
+                <span style={{ fontSize: '12px', color: '#666', lineHeight: '32px' }}>
+                  共 {debugHtml.length} 字符
+                </span>
+              </div>
+              <pre style={{
+                backgroundColor: '#f5f5f5',
+                padding: '16px',
+                borderRadius: '4px',
+                fontSize: '12px',
+                lineHeight: '1.5',
+                overflow: 'auto',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all'
+              }}>
+                {debugHtml}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

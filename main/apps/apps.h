@@ -277,15 +277,27 @@ private:
         int pageCount;
     };
     
+    // 链接信息
+    struct LinkInfo {
+        std::string text;      // 链接文本
+        int x, y, w, h;        // 碰撞检测区域
+        std::string href;      // 原始链接地址
+        std::string type;      // "internal" 或 "external"
+        int targetSection;     // 目标章节（internal类型）
+        int targetPage;        // 目标页面（internal类型）
+    };
+    
     // 图书信息
     struct BookInfo {
         std::string id;
         std::string title;
         std::string author;
+        std::string addedAt;        // 新增：添加时间
         std::string lastReadTime;
         int currentSection;
         int currentPage;
         std::vector<SectionInfo> sections;
+        std::map<std::string, std::pair<int, int>> anchorMap;  // 新增：锚点映射 anchor_id -> (section, page)
         uint8_t* coverData = nullptr;
         size_t coverSize = 0;
     };
@@ -304,6 +316,8 @@ private:
     size_t _page_image_size = 0;
     bool _show_toc = false;
     int _page_flip_count = 0;  // 翻页计数，用于控制全刷新
+    std::vector<LinkInfo> _current_page_links;  // 新增：当前页面的链接信息
+    bool _current_page_has_image = false;  // 新增：当前页面是否包含图片
     
     // 触摸区域（列表）
     int _back_btn_x = 0, _back_btn_y = 0, _back_btn_w = 0, _back_btn_h = 0;
@@ -328,6 +342,12 @@ private:
     // 翻页
     void nextPage();
     void prevPage();
+    
+    // 链接处理
+    void loadPageLinks();           // 加载当前页面的链接信息
+    void drawLinkIndicators();      // 绘制链接指示器（下划线）
+    bool handleLinkTouch(int x, int y);  // 处理链接点击
+    void jumpToAnchor(const std::string& anchor);  // 跳转到锚点
     void gotoSection(int sectionIndex);
     
     // 工具函数
