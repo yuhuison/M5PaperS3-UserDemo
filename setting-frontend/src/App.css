@@ -1,0 +1,266 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.app-header {
+  padding: 2rem;
+  text-align: center;
+  border-bottom: 1px solid #ccc;
+}
+
+.app-header h1 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.app-header p {
+  color: #666;
+  font-size: 1rem;
+}
+
+.app-header .warning {
+  color: #e74c3c;
+  font-weight: bold;
+  margin-top: 0.5rem;
+}
+
+.app-header .success {
+  color: #27ae60;
+  margin-top: 0.5rem;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.app-footer {
+  padding: 1rem;
+  text-align: center;
+  border-top: 1px solid #ccc;
+  color: #666;
+  font-size: 0.875rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-header,
+  .app-footer {
+    border-color: #444;
+  }
+
+  .app-header p,
+  .app-footer {
+    color: #999;
+  }
+}
+
+/* 连接选择界面样式 */
+.connection-selector {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.connection-selector h1 {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.connection-selector .subtitle {
+  color: #666;
+  font-size: 1.2rem;
+  margin-bottom: 2rem;
+}
+
+.error-message {
+  background: #fee;
+  border: 1px solid #fcc;
+  color: #c00;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+}
+
+.connection-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.connection-card {
+  background: #fff;
+  border: 2px solid #e0e0e0;
+  border-radius: 16px;
+  padding: 2rem;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+.connection-card:hover {
+  border-color: #007bff;
+  box-shadow: 0 4px 20px rgba(0, 123, 255, 0.15);
+}
+
+.connection-card.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.connection-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.connection-card h2 {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.connection-desc {
+  color: #666;
+  margin-bottom: 0.5rem;
+}
+
+.connection-speed {
+  color: #007bff;
+  font-weight: bold;
+  margin-bottom: 1.5rem;
+}
+
+.connection-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.connection-form input {
+  padding: 0.75rem 1rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.connection-form input:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+}
+
+.connect-btn {
+  padding: 0.75rem 1.5rem;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.connect-btn:hover:not(:disabled) {
+  background: #0056b3;
+}
+
+.connect-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.connect-btn.usb-btn {
+  background: #28a745;
+}
+
+.connect-btn.usb-btn:hover:not(:disabled) {
+  background: #1e7e34;
+}
+
+.not-supported {
+  color: #999;
+  font-size: 0.9rem;
+}
+
+.not-supported p {
+  margin: 0.5rem 0;
+}
+
+.browser-hint {
+  font-size: 0.8rem;
+}
+
+.connection-help {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 1.5rem;
+  text-align: left;
+}
+
+.connection-help h3 {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1.5rem;
+}
+
+.help-item ol {
+  margin: 0.5rem 0 0 1.5rem;
+  padding: 0;
+}
+
+.help-item li {
+  margin: 0.3rem 0;
+  color: #666;
+}
+
+/* 暗色模式 */
+@media (prefers-color-scheme: dark) {
+  .connection-selector .subtitle {
+    color: #aaa;
+  }
+
+  .error-message {
+    background: #3a1a1a;
+    border-color: #5a2a2a;
+    color: #ff6b6b;
+  }
+
+  .connection-card {
+    background: #2a2a2a;
+    border-color: #444;
+  }
+
+  .connection-card:hover {
+    border-color: #007bff;
+  }
+
+  .connection-desc {
+    color: #aaa;
+  }
+
+  .connection-form input {
+    background: #333;
+    border-color: #555;
+    color: #fff;
+  }
+
+  .connection-help {
+    background: #2a2a2a;
+  }
+
+  .help-item li {
+    color: #aaa;
+  }
+}

@@ -108,6 +108,11 @@ public:
         return M5.Touch.getDetail();
     }
     bool wasTouchClickedArea(int x, int y, int w, int h);
+    
+    bool isSdCardMounted() const
+    {
+        return _is_sd_card_mounted;
+    }
 
 private:
     bool _refresh_request    = false;

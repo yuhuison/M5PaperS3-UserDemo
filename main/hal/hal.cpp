@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <vector>
 #include <driver/ledc.h>
+#include <cerrno>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -249,11 +250,14 @@ void Hal::sd_card_init()
 
 void Hal::sdCardTest()
 {
+    mclog::tagInfo(_tag, "sdCardTest called, _is_sd_card_mounted={}", _is_sd_card_mounted);
+    
     if (!_is_sd_card_mounted) {
         sd_card_init();
         if (!_is_sd_card_mounted) {
             _sd_card_test_result.is_mounted = false;
             _sd_card_test_result.size       = "Not Found";
+            mclog::tagError(_tag, "SD card not mounted after init");
             return;
         }
     }
@@ -261,15 +265,18 @@ void Hal::sdCardTest()
     _sd_card_test_result.is_mounted = true;
 
     // Try write to sd card
+    mclog::tagInfo(_tag, "Trying to write test file to SD card...");
     FILE* fp = fopen(MOUNT_POINT "/test.txt", "w");
     if (fp) {
         fwrite("Hello, World!", 1, 13, fp);
         fclose(fp);
+        mclog::tagInfo(_tag, "SD card write test succeeded");
 
         _sd_card_test_result.size =
             fmt::format("Size: {:.1f} GB",
                         ((float)((uint64_t)_sd_card->csd.capacity) * _sd_card->csd.sector_size) / (1024 * 1024 * 1024));
     } else {
+        mclog::tagError(_tag, "SD card write test failed (errno={})", errno);
         _sd_card_test_result.size = "Write Failed";
     }
 

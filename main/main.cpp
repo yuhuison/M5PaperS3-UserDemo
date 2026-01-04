@@ -77,24 +77,26 @@ extern "C" void app_main(void)
 
     GetHAL().init();
 
-    boot_display_test();
+    // 简单的启动清屏
+    GetHAL().display.setEpdMode(epd_mode_t::epd_quality);
+    GetHAL().display.fillScreen(TFT_WHITE);
+    GetHAL().delay(500);
 
     // Install apps
-    GetMooncake().installApp(std::make_unique<AppPower>());
-    GetMooncake().installApp(std::make_unique<AppSdCard>());
-    GetMooncake().installApp(std::make_unique<AppRtc>());
-    GetMooncake().installApp(std::make_unique<AppBuzzer>());
-    GetMooncake().installApp(std::make_unique<AppImu>());
-    GetMooncake().installApp(std::make_unique<AppWifi>());
-
-    // Trigger startup refresh
-    check_full_display_refresh_request(true);
+    // 原有测试App保留但不运行，仅作参考
+    // GetMooncake().installApp(std::make_unique<AppPower>());
+    // GetMooncake().installApp(std::make_unique<AppSdCard>());
+    // GetMooncake().installApp(std::make_unique<AppRtc>());
+    // GetMooncake().installApp(std::make_unique<AppBuzzer>());
+    // GetMooncake().installApp(std::make_unique<AppImu>());
+    // GetMooncake().installApp(std::make_unique<AppWifi>());
+    
+    // Home UI App
+    GetMooncake().installApp(std::make_unique<AppHome>());
 
     while (1) {
         M5.update();
-        check_full_display_refresh_request();
         GetMooncake().update();
-        GetHAL().clearRefreshRequest();
         GetHAL().feedTheDog();
     }
 }
