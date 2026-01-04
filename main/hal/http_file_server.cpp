@@ -15,8 +15,9 @@
 
 static const char* TAG = "HttpFileServer";
 
-// 文件读写缓冲区大小
-static const size_t FILE_BUFFER_SIZE = 4096;
+// 文件读写缓冲区大小 - 增大到 16KB 可以显著提高传输速度
+// 注意：此值受 SPI max_transfer_sz 限制，但可以减少系统调用次数
+static const size_t FILE_BUFFER_SIZE = 16384;
 
 // SD卡根路径
 static const char* SD_ROOT = "/sdcard";

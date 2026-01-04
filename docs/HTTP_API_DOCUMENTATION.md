@@ -383,335 +383,6 @@ curl -X POST "http://192.168.1.100/api/upload-batch?dir=/books/new_book" \
 
 ---
 
-### 9. ZIP文件上传并解压（推荐）
-
-上传ZIP文件并在设备端流式解压。这是上传大量文件的**推荐方式**，比批量上传更快、更可靠、更省内存。
-
-**端点**: `POST /api/upload-zip?dir=<目标目录>`
-
-**请求头**:
-- `Content-Type`: `application/zip` 或 `application/octet-stream`
-
-**查询参数**:
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| dir | string | 否 | 解压目标目录，默认为根目录 |
-
-**优势**:
-- ✅ **更快**: 只需一次HTTP请求，减少网络开销（比批量上传快3-5倍）
-- ✅ **更小**: ZIP压缩减少传输数据量（通常节省30-70%带宽）
-- ✅ **更稳定**: 避免多文件上传中断问题
-- ✅ **内存安全**: 流式解压，仅需~40KB内存，不会溢出
-- ✅ **自动创建**: 自动递归创建目录结构
-- ✅ **智能过滤**: 自动跳过macOS特殊文件和隐藏文件
-
-**技术实现**:
-- 使用ESP-IDF内置miniz库的tinfl_decompress进行DEFLATE解压
-- 支持STORE（无压缩）和DEFLATE（压缩）两种格式
-- **推荐STORE**: 图片/EPUB等已压缩文件使用STORE无压缩，速度更快（无解压开销）
-- 流式处理：边接收边解压，无需完整缓存ZIP文件
-- **性能优化**: 256KB大缓冲区（利用8MB PSRAM），SD卡写入速度可达5-8MB/s
-- 内存占用：256KB接收缓冲 + 32KB解压字典 + 256KB输出缓冲 ≈ 544KB
-
-**请求示例**:
-```bash
-# 使用curl上传ZIP文件
-curl -X POST "http://192.168.1.100/api/upload-zip?dir=/books/new_book" \
-  -H "Content-Type: application/zip" \
-  --data-binary @book_files.zip
-```
-
-**JavaScript示例**:
-```javascript
-// 使用JSZip打包并上传（推荐方式）
-import JSZip from 'jszip';
-
-async function uploadFilesAsZip(files, targetDir) {
-  // 创建ZIP
-  const zip = new JSZip();
-  for (const file of files) {
-    // 支持嵌套目录结构
-    zip.file(file.relativePath || file.name, file);
-  }
-  
-  // 生成ZIP blob（推荐使用STORE无压缩以获得最佳性能）
-  const zipBlob = await zip.generateAsync({ 
-    type: 'blob',
-    compression: 'STORE',  // 使用STORE无压缩，速度最快！
-    // compression: 'DEFLATE',  // 如果需要压缩可使用DEFLATE
-    // compressionOptions: { level: 6 }
-  });
-  
-  // 上传
-  const response = await fetch(
-    `http://192.168.1.100/api/upload-zip?dir=${encodeURIComponent(targetDir)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
-      body: zipBlob
-    }
-  );
-  
-  return response.json();
-}
-
-// 使用示例1: 从文件输入上传
-const fileInput = document.querySelector('input[type="file"]');
-const files = Array.from(fileInput.files);
-const result = await uploadFilesAsZip(files, '/books/my_book');
-console.log(`成功解压 ${result.extracted} 个文件`);
-
-// 使用示例2: 上传带目录结构的文件
-const filesWithPath = [
-  { name: 'cover.png', data: coverBlob },
-  { name: 'sections/001/001.png', data: page1Blob },
-  { name: 'sections/001/002.png', data: page2Blob },
-];
-
-const zip = new JSZip();
-filesWithPath.forEach(f => zip.file(f.name, f.data));
-const zipBlob = await zip.generateAsync({
-  type: 'blob',
-  compression: 'DEFLATE',
-  compressionOptions: { level: 6 }
-});
-
-const response = await fetch(
-  'http://192.168.1.100/api/upload-zip?dir=/books/my_book',
-  {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/zip' },
-    body: zipBlob
-  }
-);
-const result = await response.json();
-console.log(`解压完成: ${result.extracted} 个文件`);
-
-// 使用示例3: 带进度显示的上传
-async function uploadWithProgress(zipBlob, targetDir, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        const percent = (e.loaded / e.total) * 100;
-        onProgress(percent);
-      }
-    });
-    
-    xhr.addEventListener('load', () => {
-      if (xhr.status === 200) {
-        resolve(JSON.parse(xhr.responseText));
-      } else {
-        reject(new Error(`Upload failed: ${xhr.status}`));
-      }
-    });
-    
-    xhr.addEventListener('error', () => {
-      reject(new Error('Network error'));
-    });
-    
-    xhr.open('POST', 
-      `http://192.168.1.100/api/upload-zip?dir=${encodeURIComponent(targetDir)}`
-    );
-    xhr.setRequestHeader('Content-Type', 'application/zip');
-    xhr.send(zipBlob);
-  });
-}
-
-// 使用进度上传
-await uploadWithProgress(zipBlob, '/books/my_book', (percent) => {
-  console.log(`上传进度: ${percent.toFixed(1)}%`);
-  document.getElementById('progress').value = percent;
-});
-```
-
-**Python示例**:
-```python
-import requests
-import zipfile
-import io
-import os
-
-def upload_files_as_zip(files_dict, target_dir, device_ip='192.168.1.100'):
-    """
-    上传文件到M5PaperS3设备（ZIP方式）
-    
-    Args:
-        files_dict: {'相对路径': bytes内容 或 文件路径字符串} 的字典
-        target_dir: 目标目录
-        device_ip: 设备IP地址
-    
-    Returns:
-        dict: 包含extracted和errors的响应
-    """
-    # 创建内存中的ZIP
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for filename, content in files_dict.items():
-            if isinstance(content, str) and os.path.exists(content):
-                # 如果是文件路径，读取文件内容
-                zf.write(content, filename)
-            else:
-                # 如果是bytes内容，直接写入
-                zf.writestr(filename, content)
-    
-    zip_buffer.seek(0)
-    
-    # 上传
-    response = requests.post(
-        f'http://{device_ip}/api/upload-zip?dir={target_dir}',
-        headers={'Content-Type': 'application/zip'},
-        data=zip_buffer.read()
-    )
-    
-    return response.json()
-
-# 使用示例1: 上传本地文件
-files = {
-    'cover.png': 'local/cover.png',  # 本地文件路径
-    'sections/001/001.png': 'local/pages/page1.png',
-    'sections/001/002.png': 'local/pages/page2.png',
-}
-result = upload_files_as_zip(files, '/books/new_book')
-print(f"解压完成: {result['extracted']} 个文件，失败: {result['errors']} 个")
-
-# 使用示例2: 上传内存中的内容
-files = {
-    'config.json': b'{"theme": "dark"}',
-    'readme.txt': b'This is a book',
-}
-result = upload_files_as_zip(files, '/books/my_book')
-
-# 使用示例3: 批量上传目录（保留目录结构）
-def upload_directory_as_zip(local_dir, remote_dir, device_ip='192.168.1.100'):
-    """
-    将本地目录打包成ZIP并上传，保留目录结构
-    
-    Args:
-        local_dir: 本地目录路径
-        remote_dir: 远程目标目录
-        device_ip: 设备IP地址
-    """
-    files_dict = {}
-    
-    # 遍历本地目录
-    for root, dirs, files in os.walk(local_dir):
-        for file in files:
-            # 跳过隐藏文件
-            if file.startswith('.'):
-                continue
-            
-            local_path = os.path.join(root, file)
-            # 计算相对路径
-            rel_path = os.path.relpath(local_path, local_dir)
-            # 统一使用正斜杠
-            rel_path = rel_path.replace('\\', '/')
-            
-            files_dict[rel_path] = local_path
-    
-    return upload_files_as_zip(files_dict, remote_dir, device_ip)
-
-# 上传整个目录
-result = upload_directory_as_zip('my_book_folder', '/books/my_book')
-print(f"上传完成: {result['extracted']} 个文件")
-
-# 使用示例4: 带进度显示
-def upload_with_progress(files_dict, target_dir, device_ip='192.168.1.100'):
-    """带进度条的上传"""
-    import sys
-    
-    # 创建ZIP
-    print("正在打包...")
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for i, (filename, content) in enumerate(files_dict.items(), 1):
-            if isinstance(content, str):
-                zf.write(content, filename)
-            else:
-                zf.writestr(filename, content)
-            print(f"\r打包进度: {i}/{len(files_dict)}", end='')
-    
-    print("\n正在上传...")
-    zip_data = zip_buffer.getvalue()
-    
-    # 使用requests上传（可以添加进度回调）
-    response = requests.post(
-        f'http://{device_ip}/api/upload-zip?dir={target_dir}',
-        headers={'Content-Type': 'application/zip'},
-        data=zip_data
-    )
-    
-    result = response.json()
-    print(f"\n上传完成: {result['extracted']} 个文件")
-    return result
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "extracted": 15,
-  "errors": 0
-}
-```
-
-**响应字段说明**:
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| success | boolean | 是否成功（只要有文件解压成功就返回true） |
-| extracted | number | 成功解压的文件数量 |
-| errors | number | 解压失败的文件数量（包括跳过的文件） |
-
-**ZIP文件要求**:
-- 格式：标准ZIP格式（ZIP 2.0规范）
-- 压缩方法：STORE（0）或DEFLATE（8）
-- 不支持：ZIP64、加密、分卷、多磁盘ZIP
-- 编码：文件名建议使用UTF-8或ASCII
-
-**自动过滤规则**:
-以下文件会被自动跳过（不计入extracted）：
-- 目录条目（ZIP中的目录标记）
-- 隐藏文件：以 `.` 开头的文件（如 `.gitignore`）
-- macOS特殊文件：`__MACOSX/` 目录下的所有文件
-- macOS元数据：`.DS_Store` 文件
-- 空文件名的条目
-
-**错误处理**:
-- 如果ZIP文件损坏，返回错误响应
-- 如果单个文件解压失败，跳过该文件，继续解压其他文件
-- SD卡空间不足时，停止解压并返回已解压文件数
-- 临时文件（`.temp_upload.zip`）在解压完成后自动删除
-
-**注意事项**:
-- 自动跳过目录条目、隐藏文件（以`.`开头）、macOS特殊文件（`__MACOSX`、`.DS_Store`）
-- 自动递归创建所需的子目录结构
-- 支持的压缩方法：STORE（无压缩）和DEFLATE（标准压缩）
-- **⚡ 性能建议**：
-  - **首选STORE无压缩**：对于图片(PNG/JPG)、电子书(EPUB)等已压缩文件，使用STORE格式，速度提升4倍！
-  - **仅文本用DEFLATE**：只有纯文本、JSON、XML等未压缩文件才建议使用DEFLATE压缩
-  - 压缩等级：如使用DEFLATE，推荐level 1-3（快速压缩）而非level 6-9（慢）
-- 推荐ZIP文件大小：<100MB（256KB缓冲区优化后，STORE模式可达5-8MB/s写入速度）
-- 实测速度：STORE约5-8MB/s，DEFLATE约500KB/s-1MB/s（取决于压缩率）
-
-**使用场景**:
-1. **电子书上传**: 将书籍的所有章节图片打包成ZIP上传
-2. **批量导入**: 一次性导入大量配置文件或资源文件
-3. **备份还原**: 从备份ZIP快速恢复文件
-4. **离线传输**: 在电脑上准备好ZIP包，设备联网后一次性上传
-
-**性能对比**:
-| 操作方式 | 100个文件(10MB) | 压缩方法 | 网络请求数 | 内存占用 | 实测速度 |
-|---------|----------------|---------|-----------|---------|---------|
-| 逐个上传 | ~60秒 | 无 | 100次 | 低 | 约170KB/s |
-| 批量上传 | ~30秒 | 无 | 1次 | 中等 | 约340KB/s |
-| ZIP上传(DEFLATE) | ~20秒 | 压缩 | 1次 | 544KB | 约500KB/s |
-| **ZIP上传(STORE)** | **~5秒** | **无** | **1次** | **544KB** | **约2MB/s** ⚡ |
-
-> **推荐**: 对于图片、EPUB等已压缩文件，使用STORE无压缩格式，速度提升4倍！
-
----
-
 ## 错误响应
 
 所有API在发生错误时返回统一的错误格式：
@@ -961,77 +632,8 @@ console.log('电子书列表:', books.items);
 |------|---------|------|
 | 单个小文件 (<1MB) | `/api/file` | 简单直接 |
 | 单个大文件 (>10MB) | `/api/file` | 支持进度显示 |
-| 多个文件 (<10个) | `/api/upload-batch` | 减少请求次数 |
-| **大量文件 (>10个)** | **`/api/upload-zip`** | **最佳性能** |
-| 带目录结构的文件 | `/api/upload-zip` | 自动创建目录 |
+| **多个文件** | **`/api/upload-batch`** | **一次请求上传多文件** |
 | 需要断点续传 | `/api/file` 逐个上传 | 失败后重传单个文件 |
-
-**ZIP上传最佳实践**:
-```javascript
-// 1. 设置合适的压缩等级（推荐6）
-const zipOptions = {
-  type: 'blob',
-  compression: 'DEFLATE',
-  compressionOptions: { 
-    level: 6  // 0-9，6是性能和压缩率的最佳平衡
-  }
-};
-
-// 2. 大文件时显示打包进度
-const zip = new JSZip();
-let processed = 0;
-for (const file of files) {
-  zip.file(file.name, file);
-  processed++;
-  console.log(`打包进度: ${processed}/${files.length}`);
-}
-
-// 3. 分批处理大量文件（>500个文件建议分批）
-async function uploadLargeBookInBatches(files, targetDir) {
-  const BATCH_SIZE = 200;
-  const results = [];
-  
-  for (let i = 0; i < files.length; i += BATCH_SIZE) {
-    const batch = files.slice(i, i + BATCH_SIZE);
-    const zip = new JSZip();
-    batch.forEach(f => zip.file(f.name, f));
-    
-    const zipBlob = await zip.generateAsync(zipOptions);
-    const result = await fetch(
-      `http://192.168.1.100/api/upload-zip?dir=${targetDir}`,
-      { method: 'POST', body: zipBlob }
-    ).then(r => r.json());
-    
-    results.push(result);
-    console.log(`批次 ${i/BATCH_SIZE + 1}: ${result.extracted} 个文件`);
-  }
-  
-  return results;
-}
-
-// 4. 错误处理和重试
-async function uploadWithRetry(zipBlob, targetDir, maxRetries = 3) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const response = await fetch(
-        `http://192.168.1.100/api/upload-zip?dir=${targetDir}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/zip' },
-          body: zipBlob
-        }
-      );
-      
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json();
-    } catch (error) {
-      console.warn(`上传失败 (尝试 ${i + 1}/${maxRetries}):`, error);
-      if (i === maxRetries - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
-}
-```
 
 ### 2. 路径处理
 
@@ -1043,11 +645,9 @@ async function uploadWithRetry(zipBlob, targetDir, maxRetries = 3) {
 ### 3. 大文件上传
 
 对于大文件（>10MB），建议：
-- **首选ZIP方式**：如果是多文件，打包成ZIP上传
 - 显示上传进度（使用XMLHttpRequest）
 - 添加超时处理（建议timeout: 300000，即5分钟）
 - 检查SD卡剩余空间（调用 `/api/info`）
-- 考虑网络质量，必要时降低压缩等级或分批上传
 
 ```javascript
 // 大文件上传示例（带进度和超时）
@@ -1081,7 +681,7 @@ await uploadWithProgress(file, '/books/large.pdf', (percent) => {
 });
 ```
 
-### 3. 错误处理
+### 4. 错误处理
 
 统一的错误处理封装：
 
@@ -1114,67 +714,49 @@ async function safeRequest(url, options) {
 // 使用示例
 try {
   const result = await safeRequest(
-    'http://192.168.1.100/api/upload-zip?dir=/books',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
-      body: zipBlob
-    }
+    'http://192.168.1.100/api/file?path=/books/test.png',
+    { method: 'POST', body: imageBlob }
   );
-  console.log(`成功上传 ${result.extracted} 个文件`);
+  console.log('上传成功:', result);
 } catch (error) {
   console.error('上传失败:', error.message);
-  // 显示用户友好的错误提示
 }
 ```
 
-### 4. 批量操作
+### 5. 批量操作
 
-**推荐：使用ZIP方式批量上传**
-```javascript
-// 推荐方式：打包成ZIP上传
-async function uploadMultipleFiles(files, targetDir) {
-  const zip = new JSZip();
-  files.forEach(file => zip.file(file.name, file));
-  
-  const zipBlob = await zip.generateAsync({
-    type: 'blob',
-    compression: 'DEFLATE',
-    compressionOptions: { level: 6 }
-  });
-  
-  const result = await fetch(
-    `http://192.168.1.100/api/upload-zip?dir=${targetDir}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
-      body: zipBlob
-    }
-  ).then(r => r.json());
-  
-  console.log(`成功上传 ${result.extracted} 个文件`);
-  return result;
-}
-```
-
-**备用方式：逐个上传（仅小批量文件）**
+使用 `/api/upload-batch` 批量上传文件：
 
 ```javascript
-// 批量上传图书
-async function uploadBooks(files) {
-  const results = [];
+// 批量上传文件（使用 multipart/form-data）
+async function uploadBatch(files, targetDir) {
+  const formData = new FormData();
   
   for (const file of files) {
-    try {
-      const result = await client.uploadFile(file, `/books/${file.name}`);
-      results.push({ success: true, file: file.name, ...result });
-    } catch (error) {
-      results.push({ success: false, file: file.name, error: error.message });
-    }
+    // 可以指定相对路径作为 filename
+    formData.append('file', file.blob, file.path || file.name);
   }
   
-  return results;
+  const response = await fetch(
+    `http://192.168.1.100/api/upload-batch?dir=${encodeURIComponent(targetDir)}`,
+    {
+      method: 'POST',
+      body: formData
+    }
+  );
+  
+  return response.json();
 }
+
+// 使用示例
+const files = [
+  { blob: coverBlob, path: 'cover.png' },
+  { blob: page1Blob, path: 'sections/001/001.png' },
+  { blob: page2Blob, path: 'sections/001/002.png' },
+];
+
+const result = await uploadBatch(files, '/books/my_book');
+console.log(`成功上传 ${result.count} 个文件`);
 ```
 
 ---
@@ -1216,23 +798,7 @@ async function uploadBooks(files) {
 - 确保目标目录存在，或先创建
 - 使用ASCII文件名
 
-### 问题3: ZIP上传失败
-
-**症状**: 上传返回错误或部分文件未解压
-
-**可能原因**:
-1. ZIP文件格式不兼容（使用了ZIP64或加密）
-2. SD卡空间不足
-3. ZIP文件损坏
-4. 压缩方法不支持（非STORE/DEFLATE）
-
-**解决方案**:
-- 使用标准ZIP格式（不要使用ZIP64）
-- 确保足够的SD卡空间（至少2倍ZIP文件大小）
-- 重新创建ZIP文件，使用DEFLATE压缩
-- 验证ZIP文件完整性：`unzip -t file.zip`
-
-### 问题4: CORS错误
+### 问题3: CORS错误
 
 **症状**: 浏览器控制台显示CORS错误
 
@@ -1245,18 +811,11 @@ async function uploadBooks(files) {
 
 ## 更新日志
 
-### v1.1.0 (2026-01-03)
-- ✨ 新增 `/api/upload-zip` 接口：支持ZIP文件上传并流式解压
-- 🚀 性能优化：ZIP上传比批量上传快3-5倍，内存占用仅40KB
-- 🔧 技术实现：集成ESP-IDF内置miniz库（tinfl_decompress）
-- 📁 智能处理：自动创建目录结构，过滤macOS特殊文件
-- 💡 推荐方式：大量文件上传优先使用ZIP方式
-- 📊 支持格式：STORE和DEFLATE压缩方法
-
 ### v1.0.0 (2026-01-03)
 - 初始版本
 - 支持基本的文件上传、下载、删除
 - 支持目录列表和创建
+- 支持批量上传 (`/api/upload-batch`)
 - 提供设备信息查询
 - 支持CORS跨域访问
 

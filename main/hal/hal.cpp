@@ -205,7 +205,7 @@ void Hal::sd_card_init()
         .sclk_io_num     = PIN_SCLK,
         .quadwp_io_num   = -1,
         .quadhd_io_num   = -1,
-        .max_transfer_sz = 4000,
+        .max_transfer_sz = 16384,  // 增大传输大小提高速度
     };
 
     // Initialize SPI bus only if not already initialized
